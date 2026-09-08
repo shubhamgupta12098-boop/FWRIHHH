@@ -1,0 +1,10 @@
+FoodWise Pro v13
+- Firebase Email/Password authentication wired to Login/Create Account
+- Firebase Forgot Password email flow
+- MongoDB backend for users, per-user app state and long-lived sessions
+- MongoDB GridFS for persistent AI-generated food images on Render
+- render.yaml Blueprint included
+- Mobile/PWA metadata improved
+- Login/Create Account/Forgot Password always English
+- Existing English/Hinglish/Hindi app settings retained after login
+- Gemini chatbot, Cloudflare image generation, real-retailer handoff, Excel report and household portions retained

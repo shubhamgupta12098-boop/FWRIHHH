@@ -1,0 +1,16 @@
+FoodWise v10 - Real Retailer Shopping Hub
+
+What is real in this build:
+- Blinkit, Zepto, Flipkart Minutes, Swiggy Instamart and BigBasket open from FoodWise.
+- A product can be searched on a chosen retailer.
+- For a multi-item FoodWise cart, the list is copied to your clipboard and the selected retailer opens.
+- Live price, stock, delivery address, login, OTP and payment stay on the retailer's official website/app.
+- After you successfully place the external order, return to FoodWise and tap "Yes, add to inventory". The purchased items are then added to inventory and expiry tracking starts.
+
+Why checkout is not silently placed on Blinkit/Zepto/Flipkart Minutes:
+Those consumer services do not expose a general public checkout API that can simply be called with a personal API key. Never scrape private APIs or store retailer passwords/OTP/payment details.
+
+Swiggy Instamart:
+Swiggy publishes developer/MCP transactional tooling for approved/authenticated builders. True in-app Instamart ordering can be added later after you receive the required developer access and user-auth flow.
+
+FoodWise local catalog prices are only estimates. The retailer is the source of truth for live prices and availability.

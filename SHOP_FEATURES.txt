@@ -1,0 +1,25 @@
+FOODWISE PRO v7 — SMART GROCERY SHOP
+
+Bottom navigation:
+Home | Inventory | Shop | Planner | More
+
+Shop features:
+- Realistic grocery catalog with local images
+- Search products and filter by category
+- Smart Shopping Guard checks current inventory
+- IN STOCK warning if a matching item already exists
+- USE FIRST warning when matching food is close to expiry
+- BUY LESS warning based on waste history
+- Add to cart and +/- quantity controls
+- Cart subtotal, delivery fee and monthly budget check
+- Checkout with delivery address, time slot and payment method
+- Localhost demo order confirmation
+- Purchased groceries automatically enter Inventory
+- Expiry date is assigned from product shelf-life
+- Grocery spend updates monthly Budget
+- Order history + Buy Again
+- Existing Shopping List remains available separately
+- Smart Excel Report remains connected to inventory/waste/shopping data
+
+IMPORTANT:
+This build includes a complete localhost checkout simulation. It DOES NOT charge a card/UPI account or place orders with Blinkit, Zepto, BigBasket, Instamart, etc. Real retailer ordering needs the retailer's official/authorized API or partner integration plus a payment gateway.

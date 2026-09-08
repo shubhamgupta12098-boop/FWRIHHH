@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#f6fbf8" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <title>FoodWise Pro · Smart Food Waste</title>
+  <meta name="description" content="Smart household food waste reduction app" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="icon-192.png" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="authGate" class="auth-gate" aria-live="polite"></div>
+  <div class="desktop-bg" aria-hidden="true"></div>
+  <div id="app" class="phone-shell app-locked">
+    <header class="appbar">
+      <button class="round-btn" data-action="drawer" aria-label="Menu"><span class="hamb"><i></i><i></i><i></i></span></button>
+      <button class="wordmark" data-view="home" aria-label="FoodWise Home"><span class="logo-mark logo-image"><img src="assets/foodwaste-logo.png" alt="Food Waste Reduction logo"></span><span>FoodWise<small>FOOD WASTE REDUCTION</small></span></button>
+      <div class="appbar-right">
+        <button class="round-btn bell" data-view="notifications" aria-label="Notifications">🔔<b id="notifCount">0</b></button>
+        <button class="avatar" data-view="profile">SH</button>
+      </div>
+    </header>
+    <main id="main" class="screen"></main>
+    <button id="fab" class="fab" data-action="fab" aria-label="Quick add">＋</button>
+    <nav class="tabbar" aria-label="Primary navigation">
+      <button data-view="home" class="tab active"><span>⌂</span><small>Home</small></button>
+      <button data-view="inventory" class="tab"><span>▦</span><small>Inventory</small></button>
+      <button data-view="shop" class="tab"><span>🛍</span><small>Shop</small></button>
+      <button data-view="planner" class="tab"><span>▣</span><small>Planner</small></button>
+      <button data-view="more" class="tab"><span>•••</span><small>More</small></button>
+    </nav>
+  </div>
+
+  <aside id="drawer" class="drawer" aria-hidden="true">
+    <div class="drawer-panel">
+      <div class="drawer-top"><div class="wordmark"><span class="logo-mark logo-image"><img src="assets/foodwaste-logo.png" alt="Food Waste Reduction logo"></span><span>FoodWise<small>FOOD WASTE REDUCTION</small></span></div><button class="round-btn" data-action="close-drawer">✕</button></div>
+      <div class="house-card"><div class="avatar xl">SH</div><div><b id="drawerName">Household</b><span id="drawerMeta">4 members</span></div></div>
+      <div class="drawer-menu">
+        <button data-view="home">🏠 <span>Dashboard</span></button>
+        <button data-view="inventory">🥬 <span>Food Inventory</span></button>
+        <button data-view="expiry">⏳ <span>Expiry Radar</span></button>
+        <button data-view="daily">🥛 <span>Daily Essentials</span></button>
+        <button data-view="nutrition">🥗 <span>Nutrition</span></button>
+        <button data-view="leftovers">🍲 <span>Leftovers / Eat First</span></button>
+        <button data-view="recipes">🍳 <span>Smart Recipes</span></button>
+        <button data-view="shop">🛍️ <span>Grocery Shop</span></button>
+        <button data-view="shopping">🛒 <span>Shopping List</span></button>
+        <button data-view="scanner">▣ <span>Smart Scanner</span></button>
+        <button data-view="waste">♻️ <span>Waste Tracker</span></button>
+        <button data-view="analytics">📊 <span>Analytics & Impact</span></button>
+        <button data-view="report">📗 <span>Smart Excel Report</span></button>
+        <button data-view="budget">₹ <span>Budget & Savings</span></button>
+        <button data-view="challenges">🏆 <span>Challenges</span></button>
+        <button data-view="sharing">🤝 <span>Share & Donate</span></button>
+        <button data-view="storage">🧊 <span>Storage Guide</span></button>
+        <button data-view="assistant">✦ <span>AI Assistant</span></button>
+        <button data-view="profile">👥 <span>Household & Members</span></button>
+        <button data-action="logout">↪ <span>Log out</span></button>
+      </div>
+      <div class="drawer-foot"><span>Render · Firebase Auth · MongoDB · Gemini · Cloudflare</span><b>v14.0</b></div>
+    </div>
+  </aside>
+
+  <div id="sheet" class="sheet" aria-hidden="true"><div class="sheet-card"><div class="sheet-grab"></div><div class="sheet-head"><div><small id="sheetKicker"></small><h3 id="sheetTitle"></h3></div><button class="round-btn" data-action="close-sheet">✕</button></div><div id="sheetBody"></div></div></div>
+  <div id="toast" class="toast"></div>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,54 @@
+FOODWISE v9 — AI SETUP
+======================
+
+ARCHITECTURE
+- Chatbot / recipes: Google Gemini text API
+- Food image generation: Cloudflare Workers AI FLUX.1 schnell
+- YouTube recipe link: opens a YouTube search URL in a new tab; no YouTube API key is required
+
+GOOGLE GEMINI CHATBOT
+1. Create a Gemini API key in Google AI Studio.
+2. Put it in .env:
+   GEMINI_API_KEY=YOUR_KEY
+3. Default text model:
+   GEMINI_TEXT_MODEL=gemini-2.5-flash-lite
+
+CLOUDFLARE IMAGE GENERATION
+1. Create/sign in to a Cloudflare account.
+2. Open Workers AI -> Use REST API.
+3. Copy your Account ID.
+4. Create a Workers AI API Token and copy it.
+5. Put both values in .env:
+   CLOUDFLARE_ACCOUNT_ID=YOUR_ACCOUNT_ID
+   CLOUDFLARE_API_TOKEN=YOUR_TOKEN
+6. Default image model:
+   CLOUDFLARE_IMAGE_MODEL=@cf/black-forest-labs/flux-1-schnell
+
+RUN
+npm start
+Open http://localhost:3000
+
+TESTS
+Chat AI:
+http://localhost:3000/api/gemini-test
+
+Cloudflare image AI:
+http://localhost:3000/api/cloudflare-test
+
+Config (never exposes secret values):
+http://localhost:3000/api/config
+
+HOW IT WORKS
+Inventory -> Add Food -> type name and quantity -> Generate preview.
+Example: Kela + 12 -> backend asks Cloudflare FLUX for a photorealistic food photo, saves it in public/generated/, and the saved item uses that image.
+
+CHAT + YOUTUBE
+Ask:
+  Paneer tikka recipe batao YouTube link ke saath
+or:
+  Mere expiring food se kya banaun? Recipe aur YouTube video do
+
+Gemini gives the recipe. FoodWise adds a safe clickable YouTube SEARCH button for the dish. It does not invent a specific video URL, so the link stays useful even when videos change.
+
+SECURITY
+Never put GEMINI_API_KEY or CLOUDFLARE_API_TOKEN in public/app.js, HTML, screenshots, or GitHub. Keep them only in .env/server environment.

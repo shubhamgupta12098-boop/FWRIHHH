@@ -1,0 +1,8 @@
+FoodWise v6 Smart Report
+
+New features:
+- Smart Report screen: What to buy, what to delay, expiry priority, garbage/waste insight, future savings forecast.
+- Gemini AI report summary when API key is configured; deterministic local report otherwise.
+- Download real .xlsx Excel workbook from /api/report.xlsx.
+- Excel sheets: Dashboard, Buy Recommendations, Expiry Priority, Waste Analysis, Savings Forecast, Inventory.
+- Forecast uses logged avoidable waste and household reduction goal. It is an estimate, not a guarantee.

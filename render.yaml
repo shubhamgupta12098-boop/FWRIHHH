@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: foodwise-pro
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB_NAME
+        value: foodwise
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: FIREBASE_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_TEXT_MODEL
+        value: gemini-2.5-flash-lite
+      - key: GEMINI_API_VERSION
+        value: v1beta
+      - key: CLOUDFLARE_ACCOUNT_ID
+        sync: false
+      - key: CLOUDFLARE_API_TOKEN
+        sync: false
+      - key: CLOUDFLARE_IMAGE_MODEL
+        value: '@cf/black-forest-labs/flux-1-schnell'
+      - key: CLOUDFLARE_IMAGE_STEPS
+        value: '4'
