@@ -3,7 +3,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
-const { MongoClient, GridFSBucket, ObjectId } = require('mongodb');
+let MongoClient=null, GridFSBucket=null, ObjectId=null;
+try { ({ MongoClient, GridFSBucket, ObjectId } = require('mongodb')); } catch { /* Local Mode runs with Node.js built-ins only. */ }
 
 const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, 'public');
@@ -39,6 +40,48 @@ const MONGODB_URI = env('MONGODB_URI');
 const MONGODB_DB_NAME = env('MONGODB_DB_NAME', 'foodwise');
 const SESSION_SECRET = env('SESSION_SECRET');
 const NODE_ENV = env('NODE_ENV', 'development');
+const LOCAL_MODE = String(env('LOCAL_MODE', (!MONGODB_URI || !FIREBASE_API_KEY) ? 'true' : 'false')).toLowerCase() === 'true';
+const LOCAL_STATE_FILE = path.join(ROOT, 'data', 'local-state.json');
+const LOCAL_AUTH_FILE = path.join(ROOT, 'data', 'local-auth.json');
+const LOCAL_LOGIN_EMAIL = env('LOCAL_LOGIN_EMAIL', 'local@foodwise.app').toLowerCase();
+const LOCAL_LOGIN_PASSWORD = env('LOCAL_LOGIN_PASSWORD', 'foodwise123');
+const LOCAL_USER_NAME = env('LOCAL_USER_NAME', 'Local FoodWise User');
+const LOCAL_SESSION_TOKEN = 'local-mode-v21';
+
+function localPasswordHash(password, salt) {
+  return crypto.pbkdf2Sync(String(password), String(salt), 120000, 32, 'sha256').toString('hex');
+}
+function writeLocalAuth({ name, email, password }) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const rec = {
+    version: 1,
+    name: safeText(name || LOCAL_USER_NAME, 80) || LOCAL_USER_NAME,
+    email: safeText(email || LOCAL_LOGIN_EMAIL, 160).toLowerCase(),
+    salt,
+    passwordHash: localPasswordHash(password || LOCAL_LOGIN_PASSWORD, salt),
+    updatedAt: new Date().toISOString()
+  };
+  fs.mkdirSync(path.dirname(LOCAL_AUTH_FILE), { recursive: true });
+  fs.writeFileSync(LOCAL_AUTH_FILE, JSON.stringify(rec, null, 2));
+  return rec;
+}
+function readLocalAuth() {
+  try {
+    const rec = JSON.parse(fs.readFileSync(LOCAL_AUTH_FILE, 'utf8'));
+    if (rec?.email && rec?.salt && rec?.passwordHash) return rec;
+  } catch {}
+  return writeLocalAuth({ name: LOCAL_USER_NAME, email: LOCAL_LOGIN_EMAIL, password: LOCAL_LOGIN_PASSWORD });
+}
+function localUser(rec = readLocalAuth()) {
+  return { _id: 'local-user', id: 'local-user', name: rec.name || LOCAL_USER_NAME, email: rec.email || LOCAL_LOGIN_EMAIL };
+}
+function verifyLocalPassword(email, password) {
+  const rec = readLocalAuth();
+  if (String(email || '').trim().toLowerCase() !== String(rec.email || '').toLowerCase()) return false;
+  const actual = Buffer.from(localPasswordHash(password, rec.salt), 'hex');
+  const expected = Buffer.from(String(rec.passwordHash || ''), 'hex');
+  return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+}
 let activeTextModel = GEMINI_TEXT_MODEL;
 let activeImageModel = CLOUDFLARE_IMAGE_MODEL;
 
@@ -51,8 +94,8 @@ function day(offset = 0) {
 
 function seed() {
   return {
-    version: 14,
-    household: { name: 'Sharma Household', members: 4, currentServings: 4, budget: 9000, spent: 5240, veg: 'Mixed', allergies: 'Peanuts', theme: 'light', notifications: true, weeklyGoal: 25, address: 'Home · Thane, Maharashtra', deliveryNote: '', memberProfiles: [
+    version: 21,
+    household: { name: 'Sharma Household', members: 4, currentServings: 4, budget: 9000, spent: 5240, veg: 'Mixed', allergies: 'Peanuts', theme: 'dark', notifications: true, weeklyGoal: 25, address: 'Home · Thane, Maharashtra', deliveryNote: '', memberProfiles: [
       { id: 1, name: 'Shubham', role: 'Admin', appetite: 'Regular', active: true },
       { id: 2, name: 'Mom', role: 'Adult', appetite: 'Regular', active: true },
       { id: 3, name: 'Dad', role: 'Adult', appetite: 'Regular', active: true },
@@ -69,6 +112,9 @@ function seed() {
       { id: 106, name: 'Rice', emoji: '🍚', qty: '2 kg', place: 'Pantry', category: 'Grains', purchase: day(-14), expiry: day(90), cost: 180 },
       { id: 107, name: 'Frozen Peas', emoji: '🫛', qty: '500 g', place: 'Freezer', category: 'Frozen', purchase: day(-6), expiry: day(40), cost: 110 }
     ],
+    consumed: [
+      { id: 901, name: 'Curd', emoji: '🥣', qty: '200 g', place: 'Fridge', category: 'Dairy', purchase: day(-3), expiry: day(-1), cost: 35, consumedAt: new Date(Date.now()-86400000).toISOString(), consumedDate: day(-1) }
+    ],
     leftovers: [
       { id: 201, name: 'Vegetable Pulao', emoji: '🍲', qty: '1 bowl', cooked: day(-1), useBy: day(0), status: 'active' },
       { id: 202, name: 'Dal Tadka', emoji: '🥣', qty: '2 bowls', cooked: day(0), useBy: day(2), status: 'active' }
@@ -83,11 +129,8 @@ function seed() {
       { id: 402, date: day(-3), name: 'Rice', qty: '0.2 kg', reason: 'Cooked too much', cost: 18, avoidable: true },
       { id: 403, date: day(-1), name: 'Banana peel', qty: '3 pcs', reason: 'Unavoidable', cost: 0, avoidable: false }
     ],
-    meals: {
-      [day(0)]: { Breakfast: 'Paneer Toast', Lunch: 'Vegetable Pulao', Dinner: 'Palak Paneer' },
-      [day(1)]: { Breakfast: 'Banana Oats', Lunch: 'Dal Rice', Dinner: 'Tomato Pasta' },
-      [day(2)]: { Breakfast: 'Curd Paratha', Lunch: 'Peas Pulao', Dinner: 'Leftover Rescue Bowl' }
-    },
+    meals: {},
+    mealIngredients: {},
     savedRecipes: [1],
     recipes: [
       { id: 1, name: 'Paneer Tomato Toast', emoji: '🥪', time: 15, difficulty: 'Easy', type: 'Veg', uses: ['Paneer', 'Tomatoes', 'Bread'], missing: [], calories: 360 },
@@ -100,10 +143,6 @@ function seed() {
       { id: 1, title: 'Zero Waste Week', icon: '🌱', progress: 4, target: 7, reward: 250 },
       { id: 2, title: 'Eat Leftovers First', icon: '🍲', progress: 3, target: 5, reward: 150 },
       { id: 3, title: 'Smart Shopper', icon: '🛒', progress: 6, target: 10, reward: 200 }
-    ],
-    shares: [
-      { id: 1, title: 'Sealed bread packs', by: 'Aarav · 1.2 km', expires: 'Pickup today', icon: '🍞' },
-      { id: 2, title: 'Extra apples', by: 'Community Fridge · 2.4 km', expires: 'Available till 8 PM', icon: '🍎' }
     ],
     cart: [],
     orders: [],
@@ -139,7 +178,7 @@ function publicState(data) {
 function initialStateForUser(user = {}, options = {}) {
   const st = seed();
   delete st.auth;
-  st.version = 14;
+  st.version = 21;
   const name = safeText(options.name || user.name || 'You', 80) || 'You';
   const members = Math.max(1, Math.min(20, Number(options.members || 1)));
   st.household = {
@@ -154,6 +193,7 @@ function initialStateForUser(user = {}, options = {}) {
   };
   st.stats = { points: 0, streak: 0, savedMoney: 0, savedKg: 0, co2: 0, water: 0, level: 1 };
   st.inventory = [];
+  st.consumed = [];
   st.leftovers = [];
   st.shopping = [];
   st.waste = [];
@@ -161,7 +201,6 @@ function initialStateForUser(user = {}, options = {}) {
   st.mealServings = {};
   st.savedRecipes = [];
   st.challenges = (st.challenges || []).map(x => ({ ...x, progress: 0 }));
-  st.shares = [];
   st.cart = [];
   st.orders = [];
   st.dailyEssentials = [];
@@ -169,8 +208,10 @@ function initialStateForUser(user = {}, options = {}) {
 }
 function migrateState(input, user = {}) {
   const db = input && typeof input === 'object' ? { ...input } : initialStateForUser(user);
+  const previousVersion = Number(db.version || 0);
   delete db.auth;
-  db.version = 14;
+  delete db.shares;
+  db.version = 21;
   db.household = db.household || {};
   if (!Array.isArray(db.household.memberProfiles) || !db.household.memberProfiles.length) {
     const n = Math.max(1, Number(db.household.members || 1));
@@ -178,10 +219,28 @@ function migrateState(input, user = {}) {
   }
   db.household.members = db.household.memberProfiles.length;
   if (!Number(db.household.currentServings)) db.household.currentServings = db.household.members;
-  if (!db.household.theme) db.household.theme = 'light';
+  if (previousVersion < 20) db.household.theme = 'dark';
+  else if (!db.household.theme) db.household.theme = 'dark';
   if (!db.household.language) db.household.language = 'en';
+  if (typeof db.household.profileImage !== 'string' || db.household.profileImage.length > 900000) db.household.profileImage = '';
   if (!db.mealServings || typeof db.mealServings !== 'object') db.mealServings = {};
-  for (const k of ['inventory','leftovers','shopping','waste','recipes','challenges','shares','cart','orders','savedRecipes','dailyEssentials']) if (!Array.isArray(db[k])) db[k] = [];
+  if (!db.meals || typeof db.meals !== 'object' || Array.isArray(db.meals)) db.meals = {};
+  if (!db.mealIngredients || typeof db.mealIngredients !== 'object' || Array.isArray(db.mealIngredients)) db.mealIngredients = {};
+  for (const k of ['inventory','consumed','leftovers','shopping','waste','recipes','challenges','cart','orders','savedRecipes','dailyEssentials']) if (!Array.isArray(db[k])) db[k] = [];
+  // v15 planner is inventory-locked: discard legacy/free-text meal slots that do not reference live inventory IDs.
+  const liveIds = new Set(db.inventory.filter(x => !x?.expiry || String(x.expiry) >= day(0)).map(x => String(x.id)));
+  for (const [d, meals] of Object.entries(db.meals)) {
+    if (!meals || typeof meals !== 'object') { delete db.meals[d]; delete db.mealIngredients[d]; continue; }
+    for (const slot of ['Breakfast','Lunch','Dinner']) {
+      const ids = db.mealIngredients?.[d]?.[slot]?.ids;
+      if (!Array.isArray(ids) || !ids.length || !ids.every(id => liveIds.has(String(id)))) {
+        delete db.meals[d][slot];
+        if (db.mealIngredients?.[d]) delete db.mealIngredients[d][slot];
+      }
+    }
+    if (!Object.keys(db.meals[d]).length) delete db.meals[d];
+    if (db.mealIngredients?.[d] && !Object.keys(db.mealIngredients[d]).length) delete db.mealIngredients[d];
+  }
   db.dailyEssentials = db.dailyEssentials.map((x, i) => ({
     id: x?.id || Date.now() + i,
     name: safeText(x?.name || 'Milk', 80) || 'Milk',
@@ -202,7 +261,12 @@ function migrateState(input, user = {}) {
 }
 
 async function connectMongo() {
-  if (!MONGODB_URI) throw new Error('MONGODB_URI is required. Add your MongoDB Atlas connection string in .env or Render Environment.');
+  if (LOCAL_MODE) {
+    fs.mkdirSync(path.dirname(LOCAL_STATE_FILE), { recursive: true });
+    return;
+  }
+  if (!MongoClient) throw new Error('MongoDB package is not installed. Run npm install for cloud mode, or enable LOCAL_MODE=true.');
+  if (!MONGODB_URI) throw new Error('MONGODB_URI is required. Add your MongoDB Atlas connection string in .env or enable LOCAL_MODE=true.');
   if (!SESSION_SECRET || SESSION_SECRET.length < 24) console.warn('⚠ SESSION_SECRET should be at least 24 characters in production.');
   mongoClient = new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 12000, maxPoolSize: 10 });
   await mongoClient.connect();
@@ -221,7 +285,12 @@ async function connectMongo() {
   ]);
   await mongoDb.command({ ping: 1 });
 }
+function readLocalState() {
+  try { return migrateState(JSON.parse(fs.readFileSync(LOCAL_STATE_FILE, 'utf8')), localUser()); }
+  catch { const data = migrateState(seed(), localUser()); fs.writeFileSync(LOCAL_STATE_FILE, JSON.stringify(data, null, 2)); return data; }
+}
 async function getUserState(user) {
+  if (LOCAL_MODE) return readLocalState();
   const doc = await statesCol.findOne({ _id: String(user._id || user.id) });
   if (doc?.data) return migrateState(doc.data, user);
   const data = initialStateForUser(user);
@@ -229,11 +298,16 @@ async function getUserState(user) {
   return data;
 }
 async function saveUserState(user, state) {
-  const data = migrateState(state, user);
+  const data = migrateState(state, user || (LOCAL_MODE ? localUser() : {}));
+  if (LOCAL_MODE) { fs.mkdirSync(path.dirname(LOCAL_STATE_FILE), { recursive: true }); fs.writeFileSync(LOCAL_STATE_FILE, JSON.stringify(data, null, 2)); return data; }
   await statesCol.updateOne({ _id: String(user._id || user.id) }, { $set: { data, updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } }, { upsert: true });
   return data;
 }
 async function sessionUser(req) {
+  if (LOCAL_MODE) {
+    const token = cookies(req).fw_session;
+    return token === LOCAL_SESSION_TOKEN ? localUser() : null;
+  }
   const token = cookies(req).fw_session;
   if (!token) return null;
   const now = new Date();
@@ -246,6 +320,7 @@ function sessionCookie(token, maxAge = 315360000) {
   return `fw_session=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secure}`;
 }
 async function createSession(userId) {
+  if (LOCAL_MODE) return sessionCookie(LOCAL_SESSION_TOKEN);
   const token = crypto.randomBytes(40).toString('hex');
   const now = new Date();
   const expiresAt = new Date(Date.now() + 10 * 365 * 86400000);
@@ -253,6 +328,7 @@ async function createSession(userId) {
   return sessionCookie(token);
 }
 async function destroySession(req) {
+  if (LOCAL_MODE) return;
   const token = cookies(req).fw_session;
   if (token) await sessionsCol.deleteOne({ _id: sessionHash(token) });
 }
@@ -294,6 +370,7 @@ async function firebaseSignUp(email, password) { return firebaseAuthCall('signUp
 async function firebaseSignIn(email, password) { return firebaseAuthCall('signInWithPassword', { email, password, returnSecureToken: true }); }
 async function firebaseDelete(idToken) { if (idToken) { try { await firebaseAuthCall('delete', { idToken }); } catch {} } }
 async function firebaseSendPasswordReset(email) { return firebaseAuthCall('sendOobCode', { requestType: 'PASSWORD_RESET', email }); }
+async function firebaseChangePassword(idToken, password) { return firebaseAuthCall('update', { idToken, password, returnSecureToken: true }); }
 function send(res, status, data, type = 'application/json; charset=utf-8', extraHeaders = {}) {
   const body = type.startsWith('application/json') ? JSON.stringify(data) : data;
   res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store', ...extraHeaders });
@@ -568,6 +645,7 @@ async function generateFoodImage(name, quantity = '') {
   ].filter(Boolean).join(' ');
 
   const { bytes, mime } = await cloudflareGenerateImage(prompt);
+  if (LOCAL_MODE) { activeImageModel = CLOUDFLARE_IMAGE_MODEL; return { image: `data:${mime};base64,${bytes.toString('base64')}`, cached: false, provider: 'Cloudflare Workers AI', model: CLOUDFLARE_IMAGE_MODEL, interpretedAs: canonical, originalName: food, normalization: normalized.source }; }
   if (!imagesBucket) throw new Error('MongoDB image storage is not ready');
   const upload = imagesBucket.openUploadStream(base, { metadata: { mime, canonical, originalName: food, key, createdAt: new Date() } });
   await new Promise((resolve, reject) => { upload.on('finish', resolve); upload.on('error', reject); upload.end(bytes); });
@@ -621,7 +699,7 @@ async function getNutrition(name, qty) {
   if (!GEMINI_API_KEY) {
     const fallback = localNutrition(name, qty);
     if (fallback) return fallback;
-    throw new Error('Google Gemini API key is required for nutrition analysis of this food');
+    return { calories: 100, protein: 3, carbs: 15, fat: 3, fiber: 2, serving: safeText(qty, 40) || '1 household serving', note: 'Generic local estimate because Gemini is not configured. Use package nutrition label for exact values.', source: 'local-generic-estimate' };
   }
   const prompt = `Estimate nutrition for the household food item below. Return JSON only, no markdown.\nFood: ${safeText(name, 80)}\nQuantity: ${safeText(qty, 40)}\nReturn keys: calories (number kcal), protein (number grams), carbs (number grams), fat (number grams), fiber (number grams), serving (string), note (short string). Interpret Hindi/English food names and common Indian portions. Values are estimates, not medical advice.`;
   const { data } = await geminiGenerateWithFallback('text', {
@@ -684,10 +762,10 @@ function aiReply(question, state, language = '') {
     const answer = localLangText(lang, `${recipeName} is a good option for ${people} ${people===1?'person':'people'}. Use: ${uses}. Prepare the ingredients, cook vegetables/spices first, add the main ingredients, cook on medium heat, and serve in ${people} portions. Use the closest-expiry items first.`, `${recipeName} try karo — ${people} ${people===1?'person':'people'} ke liye. Use: ${uses}. Ingredients prep karo, masala/vegetables cook karo, main ingredients add karke medium heat par pakao aur ${people} portions me serve karo. Near-expiry items pehle use karo.`, `${recipeName} ${people} लोगों के लिए अच्छा विकल्प है। उपयोग करें: ${uses}। सामग्री तैयार करें, मसाला/सब्ज़ियाँ पकाएँ, मुख्य सामग्री डालकर मध्यम आँच पर पकाएँ और ${people} हिस्सों में परोसें। जल्द एक्सपायर होने वाले आइटम पहले उपयोग करें।`);
     return { answer, youtubeQuery: `${recipeName} recipe ${lang==='en'?'English':'Hindi'}` };
   }
-  if ((q.includes('paneer') || inv.includes('paneer')) && (q.includes('tomato') || inv.includes('tomatoes')) && (q.includes('bread') || inv.includes('bread'))) return { answer: localLangText(lang,'Make Paneer Tomato Toast: toast the bread, sauté tomato, add crumbled paneer and spices, cook for 5–6 minutes and serve on toast.','Paneer Tomato Toast banao: bread toast karo, tomato sauté karo, crumbled paneer + masala add karo, 5–6 min cook karke toast par serve karo.','पनीर टोमेटो टोस्ट बनाएँ: ब्रेड टोस्ट करें, टमाटर भूनें, क्रम्बल पनीर और मसाला डालें, 5–6 मिनट पकाएँ और टोस्ट पर परोसें।'), youtubeQuery: `Paneer Tomato Toast recipe ${lang==='en'?'English':'Hindi'}` };
+  if ((q.includes('paneer') || q.includes('tomato') || q.includes('bread')) && inv.includes('paneer') && inv.some(x=>x.includes('tomato')) && inv.includes('bread')) return { answer: localLangText(lang,'Make Paneer Tomato Toast: toast the bread, sauté tomato, add crumbled paneer and spices, cook for 5–6 minutes and serve on toast.','Paneer Tomato Toast banao: bread toast karo, tomato sauté karo, crumbled paneer + masala add karo, 5–6 min cook karke toast par serve karo.','पनीर टोमेटो टोस्ट बनाएँ: ब्रेड टोस्ट करें, टमाटर भूनें, क्रम्बल पनीर और मसाला डालें, 5–6 मिनट पकाएँ और टोस्ट पर परोसें।'), youtubeQuery: `Paneer Tomato Toast recipe ${lang==='en'?'English':'Hindi'}` };
   if (q.includes('leftover') || q.includes('bacha')) return { answer: localLangText(lang,'Keep leftovers in the Eat First list and follow the use-by date.','Leftovers ko Eat First list me rakho aur use-by date follow karo.','बचे खाने को Eat First सूची में रखें और use-by तारीख का पालन करें।'), youtubeQuery: '' };
   if (q.includes('shopping') || q.includes('buy') || q.includes('kharid')) return { answer: localLangText(lang,`You currently have ${state.inventory.length} inventory items. Check the fridge and pantry before making a shopping list.`,`Current inventory me ${state.inventory.length} items hain. List banane se pehle fridge/pantry check karo.`,`अभी इन्वेंटरी में ${state.inventory.length} आइटम हैं। खरीदारी सूची बनाने से पहले फ्रिज और पेंट्री जाँचें।`), youtubeQuery: '' };
-  return { answer: localLangText(lang,'I can help with expiry priority, nutrition, recipes, shopping, storage and waste reduction.','Main expiry priority, nutrition, recipes, shopping, storage aur waste reduction me help kar sakta hoon.','मैं एक्सपायरी प्राथमिकता, पोषण, रेसिपी, खरीदारी, स्टोरेज और भोजन बर्बादी कम करने में मदद कर सकता हूँ।'), youtubeQuery: '' };
+  return { answer: localLangText(lang,'Gemini is not connected, so offline mode can answer FoodWise inventory, expiry, recipe, shopping, storage and waste questions only. Connect GEMINI_API_KEY to ask anything.','Gemini connected nahi hai, isliye offline mode abhi FoodWise inventory, expiry, recipe, shopping, storage aur waste questions ka answer de sakta hai. Kuch bhi poochne ke liye GEMINI_API_KEY connect karo.','Gemini जुड़ा नहीं है, इसलिए ऑफलाइन मोड अभी FoodWise इन्वेंटरी, एक्सपायरी, रेसिपी, खरीदारी, स्टोरेज और वेस्ट सवालों का जवाब दे सकता है। कुछ भी पूछने के लिए GEMINI_API_KEY जोड़ें।'), youtubeQuery: '' };
 }
 
 function extractYoutubeMarker(text, fallback = '') {
@@ -704,15 +782,22 @@ async function aiReplyGemini(question, state, language = '') {
   const compact = {
     household: { members: state.household.members, cookingFor: state.household.currentServings || state.household.members, memberNames: (state.household.memberProfiles || []).map(x => x.name), budget: state.household.budget, spent: state.household.spent, preference: state.household.veg, allergies: state.household.allergies },
     inventory: state.inventory.map(x => ({ name: x.name, qty: x.qty, place: x.place, expiry: x.expiry })),
+    consumed: (state.consumed || []).slice(0, 30).map(x => ({ name: x.name, qty: x.qty, consumedDate: x.consumedDate || String(x.consumedAt || '').slice(0,10) })),
     leftovers: state.leftovers.filter(x => x.status === 'active').map(x => ({ name: x.name, qty: x.qty, useBy: x.useBy })),
     shopping: state.shopping.filter(x => !x.done).map(x => ({ name: x.name, qty: x.qty }))
   };
   const needsRecipe = recipeIntent(question);
   const langLabel = lang === 'hi' ? 'natural Hindi in Devanagari' : lang === 'hinglish' ? 'natural Hinglish written in Latin script' : 'clear English';
   const youtubeLang = lang === 'en' ? 'English' : 'Hindi';
-  const prompt = `You are FoodWise, a concise household food-waste assistant. The app language is ${lang}. Answer strictly in ${langLabel}. Do not switch language unless the user explicitly asks. Use ONLY the provided household inventory when referring to what the user owns. Prioritize food closest to expiry. If the user asks what to cook, names a dish, asks for a recipe, or asks for a YouTube video, give a useful recipe scaled for household.cookingFor people with: dish name, approximate ingredient quantities for that many people, ingredients from their inventory, optional missing ingredients clearly marked, and 4-7 short numbered steps. Avoid unsafe food-safety claims. ${needsRecipe ? `At the very end add exactly one separate line in this format: YOUTUBE_QUERY: <dish name> recipe ${youtubeLang}. Do not invent a direct video URL.` : 'Do not add a YOUTUBE_QUERY line unless a cooking/recipe/video request is being answered.'}
-Household data: ${JSON.stringify(compact)}
-User: ${safeText(question, 500)}`;
+  const prompt = `You are FoodWise AI, a helpful general-purpose assistant inside the FoodWise app. You may answer ANY normal user question: general knowledge, study, writing, coding, calculations, explanations, planning, technology, food, recipes, and everyday questions. The app language is ${lang}; answer in ${langLabel} unless the user explicitly requests another language.
+
+FoodWise context rule: only use the household data below when the question is actually about the user's food, inventory, consumed history, shopping, expiry, storage, leftovers, nutrition, waste, budget, meal planning, or recipes. Never pretend an item is in the user's kitchen unless it appears in the provided inventory/leftovers. For food questions, prioritize items closest to expiry.
+
+Recipe rule: if the user asks what to cook, names a dish, asks for a recipe, or asks for a YouTube cooking video, give a useful recipe scaled for household.cookingFor people. Clearly separate ingredients already in inventory from optional/missing ingredients. Give 4-7 short numbered steps and avoid unsafe food-safety claims. ${needsRecipe ? `At the very end add exactly one separate line: YOUTUBE_QUERY: <dish name> recipe ${youtubeLang}. Do not invent a direct video URL.` : 'Do not add a YOUTUBE_QUERY line unless a cooking/recipe/video request is being answered.'}
+
+For non-food questions, answer normally and do not force food advice into the response. If the question is unclear, ask one concise clarification.
+Household data (use only when relevant): ${JSON.stringify(compact)}
+User: ${safeText(question, 3000)}`;
   const { data } = await geminiGenerateWithFallback('text', {
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
     generationConfig: { temperature: 0.35, maxOutputTokens: 700 }
@@ -816,8 +901,14 @@ function makeReportXlsx(st, report, aiSummary) {
   const waste = [[T('Garbage / Waste Analysis'), '', '', '', '', ''], [H('Date'), H('Item'), H('Quantity'), H('Reason'), H('Cost ₹'), H('Avoidable')], ...(st.waste || []).map(x => [x.date, x.name, x.qty, x.reason, Number(x.cost || 0), x.avoidable ? 'Yes' : 'No']), ['', '', '', '', '', ''], [S('Summary'), '', '', '', '', ''], ['Worst item', report.waste.worstItem.name, '', '', report.waste.worstItem.cost, ''], ['Top avoidable reason', report.waste.topReason.name, '', '', report.waste.topReason.cost, ''], ['Total waste cost', '', '', '', report.waste.totalCost, ''], ['Avoidable waste cost', '', '', '', report.waste.avoidableCost, '']];
   const fore = [[T('Future Savings Forecast'), '', '', '', ''], [H('Horizon'), H('Current Baseline Waste ₹'), H(`Goal Savings @ ${Math.round(report.savings.goalPct * 100)}% ₹`), H('50% Reduction Scenario ₹'), H('Projected Waste After Goal ₹')], ...report.savings.forecast.map(x => [`${x.months} month${x.months > 1 ? 's' : ''}`, report.savings.monthlyAvoidableBaseline * x.months, x.goalSavings, x.best50Savings, x.projectedWasteAfterGoal]), ['', '', '', '', ''], ['Note', 'Estimates are based on current logged waste and may change as more data is recorded.', '', '', '']];
   const inv = [[T('Current Inventory'), '', '', '', '', '', '', ''], [H('Item'), H('Quantity'), H('Location'), H('Category'), H('Purchase'), H('Expiry'), H('Days Left'), H('Cost ₹')], ...(st.inventory || []).sort((a, b) => String(a.expiry).localeCompare(String(b.expiry))).map(x => [x.name, x.qty, x.place, x.category, x.purchase, x.expiry, reportDateDays(x.expiry), Number(x.cost || 0)])];
+  const consumed = [[T('Consumed History'), '', '', '', '', '', ''], [H('Item'), H('Quantity'), H('Location'), H('Category'), H('Consumed Date'), H('Original Expiry'), H('Cost ₹')], ...(st.consumed || []).sort((a,b)=>String(b.consumedAt||b.consumedDate||'').localeCompare(String(a.consumedAt||a.consumedDate||''))).map(x => [x.name, x.qty, x.place || '', x.category || '', x.consumedDate || String(x.consumedAt||'').slice(0,10), x.expiry || '', Number(x.cost || 0)])];
+  const ai = [[T('AI / Smart Action Brief'), '', '', ''], [H('Priority'), H('Recommendation'), H('Data basis'), H('Status')], ...String(aiSummary || '').split(/\r?\n/).filter(Boolean).map((x, i) => [i + 1, x, i < 2 ? 'Inventory + shopping + expiry' : i === 3 ? 'Waste logs' : 'Waste logs + goal', 'Live at export time'])];
+  const analyticsDays = Array.from({ length: 14 }, (_, i) => { const d = day(i - 13); const logs = (st.waste || []).filter(x => x.date === d); return [d, logs.reduce((a, x) => a + Number(x.cost || 0), 0), logs.filter(x => x.avoidable).reduce((a, x) => a + Number(x.cost || 0), 0), logs.length]; });
+  const expiryBuckets = [['Expired / today', report.expiry.filter(x => x.daysLeft <= 0).length], ['1–2 days', report.expiry.filter(x => x.daysLeft >= 1 && x.daysLeft <= 2).length], ['3–4 days', report.expiry.filter(x => x.daysLeft >= 3 && x.daysLeft <= 4).length], ['5–7 days', report.expiry.filter(x => x.daysLeft >= 5 && x.daysLeft <= 7).length]];
+  const analytics = [[T('Analytics Data · Chart Ready'), '', '', ''], [H('Date'), H('Waste Cost ₹'), H('Avoidable Cost ₹'), H('Waste Logs')], ...analyticsDays, ['', '', '', ''], [S('Expiry Risk Buckets'), '', '', ''], [H('Bucket'), H('Items'), '', ''], ...expiryBuckets.map(x => [x[0], x[1], '', '']), ['', '', '', ''], [S('Forecast Series'), '', '', ''], [H('Months'), H('Goal Savings ₹'), H('50% Scenario ₹'), H('Projected Waste ₹')], ...report.savings.forecast.map(x => [x.months, x.goalSavings, x.best50Savings, x.projectedWasteAfterGoal])];
+  const planner = [[T('Inventory-only Meal Planner'), '', '', '', ''], [H('Date'), H('Meal'), H('Plan'), H('Inventory Ingredients'), H('Servings')], ...Object.keys(st.meals || {}).sort().flatMap(d => ['Breakfast','Lunch','Dinner'].map(slot => [d, slot, st.meals?.[d]?.[slot] || '', (st.mealIngredients?.[d]?.[slot]?.uses || []).join(', '), Number(st.mealServings?.[d]?.[slot] || st.household?.currentServings || st.household?.members || 1)]))];
   const sheets = [
-    ['Dashboard', dash, [30, 38, 34, 44]], ['Buy Recommendations', buy, [24, 16, 16, 14, 16, 58]], ['Expiry Priority', exp, [24, 16, 16, 15, 12, 12, 18, 34]], ['Waste Analysis', waste, [14, 24, 18, 30, 12, 12]], ['Savings Forecast', fore, [18, 24, 24, 24, 28]], ['Inventory', inv, [24, 16, 16, 16, 14, 14, 12, 12]]
+    ['Dashboard', dash, [30, 38, 34, 44]], ['AI Insights', ai, [12, 74, 32, 20]], ['Analytics Data', analytics, [18, 18, 20, 16]], ['Buy Recommendations', buy, [24, 16, 16, 14, 16, 58]], ['Expiry Priority', exp, [24, 16, 16, 15, 12, 12, 18, 34]], ['Waste Analysis', waste, [14, 24, 18, 30, 12, 12]], ['Savings Forecast', fore, [18, 24, 24, 24, 28]], ['Inventory Planner', planner, [16, 14, 38, 48, 12]], ['Inventory', inv, [24, 16, 16, 16, 14, 14, 12, 12]], ['Consumed History', consumed, [24, 16, 16, 16, 18, 16, 12]]
   ];
   const styleXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="4"><font><sz val="11"/><name val="Calibri"/></font><font><b/><color rgb="FFFFFFFF"/><sz val="11"/><name val="Calibri"/></font><font><b/><color rgb="FFFFFFFF"/><sz val="16"/><name val="Calibri"/></font><font><b/><color rgb="FF103A2C"/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="7"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF0F9F6E"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FF0B1F1A"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE7F7F0"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFF1D6"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFDE6E3"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="2"><border/><border><left style="thin"><color rgb="FFDDE7E1"/></left><right style="thin"><color rgb="FFDDE7E1"/></right><top style="thin"><color rgb="FFDDE7E1"/></top><bottom style="thin"><color rgb="FFDDE7E1"/></bottom></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="6"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFill="1" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf><xf numFmtId="0" fontId="2" fillId="3" borderId="0" xfId="0" applyFill="1" applyFont="1"/><xf numFmtId="0" fontId="3" fillId="4" borderId="1" xfId="0" applyFill="1" applyFont="1" applyBorder="1"/><xf numFmtId="0" fontId="3" fillId="5" borderId="1" xfId="0" applyFill="1" applyFont="1" applyBorder="1"/><xf numFmtId="0" fontId="3" fillId="6" borderId="1" xfId="0" applyFill="1" applyFont="1" applyBorder="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
   const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${sheets.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('')}</Types>`;
@@ -837,12 +928,14 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   try {
     if (url.pathname === '/api/health') {
-      let mongo = 'disconnected';
-      try { await mongoDb.command({ ping: 1 }); mongo = 'connected'; } catch {}
-      return send(res, mongo === 'connected' ? 200 : 503, { ok: mongo === 'connected', app: 'FoodWise Pro v13 · Render + MongoDB + Firebase Auth', mongo, firebaseConfigured: firebaseConfigured(), time: new Date().toISOString() });
+      let mongo = LOCAL_MODE ? 'local-json' : 'disconnected';
+      if (!LOCAL_MODE) { try { await mongoDb.command({ ping: 1 }); mongo = 'connected'; } catch {} }
+      const ok = LOCAL_MODE || mongo === 'connected';
+      return send(res, ok ? 200 : 503, { ok, app: 'FoodWise Pro v21 · Profile + Firebase + MongoDB', mode: LOCAL_MODE ? 'local' : 'cloud', storage: LOCAL_MODE ? 'JSON file' : 'MongoDB', mongo, firebaseConfigured: firebaseConfigured(), time: new Date().toISOString() });
     }
-    if (url.pathname === '/api/config') return send(res, 200, { geminiConfigured: Boolean(GEMINI_API_KEY), cloudflareConfigured: cloudflareConfigured(), firebaseConfigured: firebaseConfigured(), database: 'MongoDB', imageProvider: 'Cloudflare Workers AI', imageModel: activeImageModel, textModel: activeTextModel, apiVersion: GEMINI_API_VERSION });
+    if (url.pathname === '/api/config') return send(res, 200, { localMode: LOCAL_MODE, geminiConfigured: Boolean(GEMINI_API_KEY), cloudflareConfigured: cloudflareConfigured(), firebaseConfigured: firebaseConfigured(), database: LOCAL_MODE ? 'Local JSON' : 'MongoDB', imageProvider: cloudflareConfigured() ? 'Cloudflare Workers AI' : 'Local food assets', imageModel: activeImageModel, textModel: GEMINI_API_KEY ? activeTextModel : 'FoodWise local AI', apiVersion: GEMINI_API_VERSION });
     if (url.pathname.startsWith('/api/images/') && req.method === 'GET') {
+      if (LOCAL_MODE || !imageFilesCol || !imagesBucket) return send(res, 404, { error: 'Generated image storage is unavailable in local mode' });
       const rawId = url.pathname.split('/').pop();
       if (!ObjectId.isValid(rawId)) return send(res, 404, { error: 'Image not found' });
       const oid = new ObjectId(rawId);
@@ -859,6 +952,13 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/api/auth/login' && req.method === 'POST') {
       const b = await parseBody(req);
+      if (LOCAL_MODE) {
+        const email = safeText(b.email, 160).toLowerCase();
+        const password = String(b.password || '');
+        if (!email || !password) return send(res, 400, { error: 'Email and password are required' });
+        if (!verifyLocalPassword(email, password)) return send(res, 401, { error: 'Invalid local email or password' });
+        return send(res, 200, { ok: true, user: publicUser(localUser()), localMode: true }, 'application/json; charset=utf-8', { 'Set-Cookie': sessionCookie(LOCAL_SESSION_TOKEN) });
+      }
       const email = safeText(b.email, 160).toLowerCase();
       const password = String(b.password || '');
       if (!email || !password) return send(res, 400, { error: 'Email and password are required' });
@@ -877,6 +977,19 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/api/auth/signup' && req.method === 'POST') {
       const b = await parseBody(req);
+      if (LOCAL_MODE) {
+        const name = safeText(b.name, 80), email = safeText(b.email, 160).toLowerCase(), password = String(b.password || '');
+        const householdName = safeText(b.householdName, 100);
+        const members = Math.max(1, Math.min(20, Number(b.members || 1)));
+        if (!name || !email.includes('@') || password.length < 6) return send(res, 400, { error: 'Name, valid email and 6+ character password are required' });
+        const rec = writeLocalAuth({ name, email, password });
+        const user = localUser(rec);
+        const initial = initialStateForUser(user, { name, householdName, members });
+        initial.version = 21;
+        initial.household.theme = 'dark';
+        await saveUserState(user, initial);
+        return send(res, 200, { ok: true, user: publicUser(user), localMode: true }, 'application/json; charset=utf-8', { 'Set-Cookie': sessionCookie(LOCAL_SESSION_TOKEN) });
+      }
       const name = safeText(b.name, 80), email = safeText(b.email, 160).toLowerCase(), password = String(b.password || '');
       const householdName = safeText(b.householdName, 100);
       const members = Math.max(1, Math.min(20, Number(b.members || 1)));
@@ -900,24 +1013,49 @@ const server = http.createServer(async (req, res) => {
       const b = await parseBody(req);
       const email = safeText(b.email, 160).toLowerCase();
       if (!email.includes('@')) return send(res, 400, { error: 'Please enter a valid email address' });
+      if (!firebaseConfigured()) {
+        if (LOCAL_MODE) return send(res, 200, { ok: true, message: 'This localhost build is using Local Mode. Firebase password reset becomes active when FIREBASE_API_KEY is configured and the app is deployed in Cloud Mode.' });
+        return send(res, 503, { error: 'Firebase Authentication is not configured' });
+      }
       try {
         await firebaseSendPasswordReset(email);
       } catch (err) {
         // Do not reveal whether an account exists.
         if (!['EMAIL_NOT_FOUND','USER_DISABLED'].includes(err.firebaseCode)) return send(res, err.status || 400, { error: err.message });
       }
-      return send(res, 200, { ok: true, message: 'If an account exists for this email, Firebase has sent a password reset link.' });
+      return send(res, 200, { ok: true, message: 'If a Firebase account exists for this email, a secure password reset link has been sent.' });
     }
     if (url.pathname === '/api/auth/logout' && req.method === 'POST') {
+      if (LOCAL_MODE) return send(res, 200, { ok: true, localMode: true }, 'application/json; charset=utf-8', { 'Set-Cookie': sessionCookie('', 0) });
       await destroySession(req);
       return send(res, 200, { ok: true }, 'application/json; charset=utf-8', { 'Set-Cookie': sessionCookie('', 0) });
     }
 
     const user = url.pathname.startsWith('/api/') ? await sessionUser(req) : null;
     if (url.pathname.startsWith('/api/') && !user) return send(res, 401, { error: 'Login required' });
+    if (url.pathname === '/api/auth/change-password' && req.method === 'POST') {
+      const b = await parseBody(req);
+      const currentPassword = String(b.currentPassword || '');
+      const newPassword = String(b.newPassword || '');
+      if (!currentPassword || newPassword.length < 6) return send(res, 400, { error: 'Current password and a new password of at least 6 characters are required' });
+      if (currentPassword === newPassword) return send(res, 400, { error: 'New password must be different from the current password' });
+      if (LOCAL_MODE) {
+        const rec = readLocalAuth();
+        if (!verifyLocalPassword(rec.email, currentPassword)) return send(res, 401, { error: 'Current password is incorrect' });
+        writeLocalAuth({ name: rec.name, email: rec.email, password: newPassword });
+        return send(res, 200, { ok: true, localMode: true, message: 'Local FoodWise password updated' });
+      }
+      if (!firebaseConfigured()) return send(res, 503, { error: 'Firebase Authentication is not configured' });
+      let fb;
+      try { fb = await firebaseSignIn(user.email, currentPassword); }
+      catch (err) { return send(res, 401, { error: 'Current password is incorrect' }); }
+      try { await firebaseChangePassword(fb.idToken, newPassword); }
+      catch (err) { return send(res, err.status || 400, { error: err.message }); }
+      return send(res, 200, { ok: true, message: 'Firebase password updated successfully' });
+    }
     if (url.pathname === '/api/state' && req.method === 'GET') return send(res, 200, await getUserState(user));
     if (url.pathname === '/api/state' && req.method === 'PUT') { const body = await parseBody(req); await saveUserState(user, body); return send(res, 200, { ok: true }); }
-    if (url.pathname === '/api/reset' && req.method === 'POST') { const fresh = initialStateForUser(user, { name: user.name, members: 1, householdName: `${user.name || 'My'}'s Household` }); await saveUserState(user, fresh); return send(res, 200, fresh); }
+    if (url.pathname === '/api/reset' && req.method === 'POST') { const fresh = LOCAL_MODE ? migrateState(seed(), localUser()) : initialStateForUser(user, { name: user.name, members: 1, householdName: `${user.name || 'My'}'s Household` }); await saveUserState(user, fresh); return send(res, 200, fresh); }
     if (url.pathname === '/api/ai' && req.method === 'POST') {
       const b = await parseBody(req); const st = await getUserState(user);
       if (!GEMINI_API_KEY) {
@@ -991,13 +1129,13 @@ async function startServer() {
   try {
     await connectMongo();
     server.listen(PORT, () => {
-      console.log('\n  FoodWise Pro v13 · Render + MongoDB + Firebase Password Reset ✅');
+      console.log('\n  FoodWise Pro v21 · Profile + Firebase + MongoDB ✅');
       console.log(`  URL:     http://localhost:${PORT}`);
       console.log(`  Health:  http://localhost:${PORT}/api/health`);
-      console.log(`  MongoDB: connected ✅ · database ${MONGODB_DB_NAME}`);
-      console.log(`  Firebase Auth: ${firebaseConfigured() ? 'configured ✅' : 'not configured — add FIREBASE_API_KEY'}`);
-      console.log(`  Gemini Chat: ${GEMINI_API_KEY ? 'configured ✅' : 'not configured'}`);
-      console.log(`  Cloudflare Images: ${cloudflareConfigured() ? 'configured ✅' : 'not configured'}`);
+      console.log(`  Mode:    ${LOCAL_MODE ? 'LOCAL · JSON storage · login gate enabled' : `CLOUD · MongoDB ${MONGODB_DB_NAME}`}`);
+      console.log(`  Firebase Auth: ${LOCAL_MODE ? 'local login active · Firebase skipped' : (firebaseConfigured() ? 'configured ✅' : 'not configured')}`);
+      console.log(`  Gemini Chat: ${GEMINI_API_KEY ? 'configured ✅' : 'local fallback active'}`);
+      console.log(`  Cloudflare Images: ${cloudflareConfigured() ? 'configured ✅' : 'optional / local assets active'}`);
     });
   } catch (err) {
     console.error('\nFoodWise startup failed:', err.message);

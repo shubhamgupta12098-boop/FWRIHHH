@@ -1,0 +1,8 @@
+FoodWise Pro v19 QA
+- JavaScript syntax: PASS
+- Server syntax: PASS
+- g <-> kg conversion: PASS
+- ml <-> L conversion: PASS
+- incompatible mass/volume conversion rejected: PASS
+- Consume quick buttons use selected unit: implemented
+- Restore converts back to live inventory unit: implemented

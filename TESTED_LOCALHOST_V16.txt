@@ -1,0 +1,15 @@
+FoodWise Pro v16 QA
+
+PASS: node --check server.js
+PASS: node --check public/app.js
+PASS: /api/health reports FoodWise Pro v16 in Local Mode
+PASS: state schema version 16 includes consumed[]
+PASS: consumed history survives PUT /api/state and server migration
+PASS: reset returns v16 seed
+PASS: offline generic question no longer accidentally returns a recipe
+PASS: Gemini prompt is general-purpose; inventory context is used only when relevant
+PASS: voice code requests microphone permission, supports commands, Voice-to-AI, and unmatched speech -> AI
+PASS: Excel export contains 10 sheets including Consumed History
+PASS: artifact_tool import/inspection found 10 sheets and zero formula-error matches
+
+Browser note: microphone recognition itself requires Chrome/Edge permission and an available browser speech-recognition service.

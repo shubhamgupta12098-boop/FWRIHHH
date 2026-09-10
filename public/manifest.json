@@ -3,8 +3,8 @@
   "short_name": "FoodWise",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#f5faf7",
-  "theme_color": "#f6fbf8",
+  "background_color": "#08120f",
+  "theme_color": "#08120f",
   "icons": [
     {
       "src": "/icon-192.png",

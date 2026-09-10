@@ -1,8 +1,8 @@
 {
-  "name": "foodwise-pro-render",
-  "version": "14.0.0",
+  "name": "foodwise-pro-local-first",
+  "version": "21.0.0",
   "private": true,
-  "description": "FoodWise Pro mobile-first PWA with Firebase Authentication, MongoDB backend, optional automatic Daily Essentials batches with 2\u20133 day expiry alerts, Gemini chat, Cloudflare food images and Render deployment config",
+  "description": "FoodWise Pro v21: dark-first PWA with editable profile photo, instant language switching, secure password change, Firebase auth/reset, MongoDB cloud storage and Render deployment.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

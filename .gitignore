@@ -1,5 +1,16 @@
 .env
+.env.*
+!.env.example
 atlas-credentials.env
 node_modules/
 public/generated/*
 !public/generated/.gitkeep
+npm-debug.log*
+.DS_Store
+
+data/local-state.json
+
+data/local-auth.json
+.env
+node_modules/
+data/local-state.json

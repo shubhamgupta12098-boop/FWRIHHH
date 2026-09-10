@@ -1,0 +1,10 @@
+FoodWise Pro v18 QA — UI + Navigation Fixes
+
+PASS: public/app.js syntax check
+PASS: server.js syntax check
+PASS: Local Mode /api/health returns 200 and identifies v18
+PASS: Expiry Radar exists as a registered view
+PASS: Home expiry card Inventory action does not call consume
+PASS: Inventory-only consume flow remains quantity-aware
+PASS: Real Stores uses contained responsive 2-column grid
+PASS: Service worker cache key bumped to foodwise-v18-ui-nav-fixes

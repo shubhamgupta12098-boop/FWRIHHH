@@ -1,0 +1,16 @@
+FoodWise Pro v15 — QA notes
+
+Verified in this build:
+- server.js, public/app.js and public/sw.js pass Node syntax checks.
+- Local Mode boots with only Node.js and no MongoDB/Firebase configuration.
+- /api/health, /api/config, /api/auth/me, /api/state, /api/smart-report and /api/report.xlsx respond successfully.
+- JSON state persists across a real server restart.
+- Fresh local boot creates v15 demo state and no Share/Donate state.
+- Planner logic test generated 7 days / 21 meal slots and used only live inventory IDs; expired stock was rejected.
+- Voice command logic matched English, Hinglish-style and Hindi commands.
+- Challenge progress logic is tied to saved actions/metrics and one-time reward claims.
+- Excel workbook ZIP integrity passed; artifact import found 9 sheets and zero Excel error tokens.
+- Inventory Planner Excel sheet was validated with inventory-only ingredient rows.
+
+Browser note:
+Voice recognition is a browser capability. Use Chrome or Edge on http://localhost:3000 and allow microphone permission.

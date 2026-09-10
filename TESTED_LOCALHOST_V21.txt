@@ -1,0 +1,13 @@
+FoodWise Pro v21 QA — Profile + Cloud/Render
+
+PASS: node --check server.js
+PASS: node --check public/app.js
+PASS: /api/health returns 200 in Local Mode and reports v21.
+PASS: Default local login works.
+PASS: Authenticated Change Password verifies current password, updates PBKDF2 hash, and accepts the new password.
+PASS: Test password was restored to the default after QA and data/local-auth.json was removed from the package.
+PASS: State migration returns version 21 and Dark Mode remains enabled.
+PASS: Profile photo UI resizes image client-side and state validation limits stored profile image payload.
+PASS: Firebase Forgot Password endpoint is active in Cloud Mode when FIREBASE_API_KEY is configured.
+PASS: render.yaml explicitly sets LOCAL_MODE=false and includes MongoDB/Firebase required variables.
+PASS: PWA cache key bumped to v21.

@@ -1,0 +1,11 @@
+FoodWise Pro v20 QA — Dark First + Local Login
+
+PASS: JavaScript syntax checks for server.js and public/app.js.
+PASS: GET /api/auth/me without cookie returns authenticated=false in Local Mode.
+PASS: Invalid local credentials return 401.
+PASS: Default local credentials create a v20 session cookie.
+PASS: Authenticated /api/state returns version 20 and theme=dark after v19 migration.
+PASS: Local Create Account sets custom name/email/password and a dark initial household state.
+PASS: Local logout clears the session cookie and returns to the Login gate on refresh.
+PASS: Light/Dark theme is persisted in localStorage and state after user changes it.
+PASS: PWA cache key bumped to foodwise-v20-dark-login.

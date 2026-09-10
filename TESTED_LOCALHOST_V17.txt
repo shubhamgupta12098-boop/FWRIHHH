@@ -1,0 +1,20 @@
+FoodWise Pro v17 QA — Quantity-aware Consumption
+Date: 2026-09-10
+
+PASS: public/app.js syntax check
+PASS: server.js syntax check
+PASS: Local Mode server /api/health returns 200 and identifies v17
+PASS: /api/reset returns version 17 seed
+PASS: Partial consumption test: 1 L Milk -> consume 0.25 L -> 0.75 L remains in Inventory
+PASS: Partial cost split test: ₹100 -> ₹25 consumed / ₹75 remaining
+PASS: Consumed History stores exactly 0.25 L and original quantity 1 L
+PASS: Restore test: 0.25 L returns to remaining 0.75 L -> 1 L total
+PASS: Full consumption test: 6 pcs -> item leaves Inventory and 6 pcs is stored in Consumed History
+PASS: Full restore test returns the item to Inventory
+PASS: Over-consumption validation: consuming 3 kg from 2 kg does not mutate inventory
+
+UI behavior:
+- Tapping ✓ Consumed opens a quantity sheet instead of immediately removing the item.
+- Quick quantity buttons: 25%, 50%, All.
+- Only the used amount moves to Consumed History.
+- Any remaining amount stays in active Inventory automatically.

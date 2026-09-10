@@ -1,19 +1,23 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <meta name="theme-color" content="#f6fbf8" />
+  <meta name="theme-color" content="#08120f" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>FoodWise Pro · Smart Food Waste</title>
   <meta name="description" content="Smart household food waste reduction app" />
   <link rel="manifest" href="manifest.json" />
   <link rel="apple-touch-icon" href="icon-192.png" />
+  <script>
+    (()=>{try{const t=localStorage.getItem('foodwise-theme')||'dark';document.documentElement.classList.toggle('light',t==='light');document.documentElement.classList.toggle('dark',t!=='light');const m=document.querySelector('meta[name="theme-color"]');if(m)m.content=t==='light'?'#f6fbf8':'#08120f'}catch{}})();
+  </script>
   <link rel="stylesheet" href="style.css" />
 </head>
-<body>
+<body class="dark">
+  <script>try{const t=localStorage.getItem('foodwise-theme')||'dark';document.body.classList.toggle('light',t==='light');document.body.classList.toggle('dark',t!=='light')}catch{}</script>
   <div id="authGate" class="auth-gate" aria-live="polite"></div>
   <div class="desktop-bg" aria-hidden="true"></div>
   <div id="app" class="phone-shell app-locked">
@@ -21,6 +25,7 @@
       <button class="round-btn" data-action="drawer" aria-label="Menu"><span class="hamb"><i></i><i></i><i></i></span></button>
       <button class="wordmark" data-view="home" aria-label="FoodWise Home"><span class="logo-mark logo-image"><img src="assets/foodwaste-logo.png" alt="Food Waste Reduction logo"></span><span>FoodWise<small>FOOD WASTE REDUCTION</small></span></button>
       <div class="appbar-right">
+        <button class="round-btn voice-btn" data-action="voice-control" aria-label="Voice control" title="Voice control">🎙</button>
         <button class="round-btn bell" data-view="notifications" aria-label="Notifications">🔔<b id="notifCount">0</b></button>
         <button class="avatar" data-view="profile">SH</button>
       </div>
@@ -56,13 +61,12 @@
         <button data-view="report">📗 <span>Smart Excel Report</span></button>
         <button data-view="budget">₹ <span>Budget & Savings</span></button>
         <button data-view="challenges">🏆 <span>Challenges</span></button>
-        <button data-view="sharing">🤝 <span>Share & Donate</span></button>
         <button data-view="storage">🧊 <span>Storage Guide</span></button>
         <button data-view="assistant">✦ <span>AI Assistant</span></button>
         <button data-view="profile">👥 <span>Household & Members</span></button>
         <button data-action="logout">↪ <span>Log out</span></button>
       </div>
-      <div class="drawer-foot"><span>Render · Firebase Auth · MongoDB · Gemini · Cloudflare</span><b>v14.0</b></div>
+      <div class="drawer-foot"><span>Local-first · Voice · Smart Analytics · Optional Cloud AI</span><b>v21</b></div>
     </div>
   </aside>
 
