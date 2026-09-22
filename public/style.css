@@ -232,3 +232,32 @@ body.light .profile-photo-edit>span{border-color:#fff}.light .photo-upload-drop{
 
 /* v29 mobile notification controls */
 .notification-device-card{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px;margin-bottom:12px;border:1px solid var(--line);border-radius:18px;background:var(--card);box-shadow:var(--shadow-sm)}.notification-device-card.ok{border-color:color-mix(in srgb,var(--green) 45%,var(--line));background:color-mix(in srgb,var(--green) 6%,var(--card))}.notification-device-card>div:first-child{min-width:0}.notification-device-card small{display:block;font-size:7px;font-weight:900;letter-spacing:1px;color:var(--green)}.notification-device-card h3{margin:4px 0 3px;font-size:13px}.notification-device-card p{margin:0;font-size:8px;line-height:1.45;color:var(--muted)}.notification-device-actions{flex:0 0 auto}.notification-device-actions .btn{white-space:nowrap}@media(max-width:360px){.notification-device-card{align-items:flex-start;flex-direction:column}.notification-device-actions,.notification-device-actions .btn{width:100%}}
+
+
+/* v31 · mobile compatibility fallbacks */
+.voice-type-fallback{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;margin-top:10px}.voice-type-fallback input{min-width:0;border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:13px;padding:10px 11px;font-size:10px;outline:0}.voice-type-fallback input:focus{border-color:var(--green);box-shadow:0 0 0 3px color-mix(in srgb,var(--green) 12%,transparent)}
+
+
+/* ===== v33 mobile AI chat composer fix ===== */
+/* Keep the AI text composer visible above the fixed bottom navigation on phones. */
+.chat-input{
+  position:fixed!important;
+  left:50%!important;
+  bottom:78px!important;
+  transform:translateX(-50%)!important;
+  width:min(calc(100% - 20px),460px)!important;
+  z-index:36!important;
+  padding:8px 10px calc(8px + env(safe-area-inset-bottom,0px))!important;
+  margin:0!important;
+  border-top:1px solid var(--line);
+  backdrop-filter:blur(16px);
+  box-shadow:0 -10px 28px rgba(0,0,0,.12);
+}
+.chat-input input{height:44px;font-size:14px!important}
+.chat-input button{height:44px!important;min-width:44px!important}
+.chat{padding-bottom:88px!important;max-height:none!important;overflow:visible!important}
+@media(max-width:520px){
+  .screen:has(.chat-input){padding-bottom:190px!important}
+  .assistant-hero{margin-bottom:8px}
+}
+body.light .chat-input{border-top-color:#dce8e1!important;box-shadow:0 -10px 28px rgba(20,70,50,.08)!important}

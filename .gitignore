@@ -11,3 +11,5 @@ npm-debug.log*
 data/local-state.json
 
 data/local-auth.json
+
+data/local-session-secret.txt

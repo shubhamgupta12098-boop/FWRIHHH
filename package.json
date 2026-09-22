@@ -1,8 +1,8 @@
 {
   "name": "foodwise-pro-local-first",
-  "version": "29.0.0",
+  "version": "32.0.0",
   "private": true,
-  "description": "FoodWise Pro v29: mobile notification delivery and test flow, clean notification dot, Shopping Q&A removed, whole-app voice assistant elsewhere, 7-day consumed report archive.",
+  "description": "FoodWise Pro v32: security-hardened sessions, API protection, rate limiting, secure headers, mobile compatibility, and voice assistant.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

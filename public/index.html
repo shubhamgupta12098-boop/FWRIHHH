@@ -14,7 +14,7 @@
   <script>
     (()=>{try{const t=localStorage.getItem('foodwise-theme')||'dark';document.documentElement.classList.toggle('light',t==='light');document.documentElement.classList.toggle('dark',t!=='light');const m=document.querySelector('meta[name="theme-color"]');if(m)m.content=t==='light'?'#f6fbf8':'#08120f'}catch{}})();
   </script>
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="style.css?v=33" />
 </head>
 <body class="dark">
   <script>try{const t=localStorage.getItem('foodwise-theme')||'dark';document.body.classList.toggle('light',t==='light');document.body.classList.toggle('dark',t!=='light')}catch{}</script>
@@ -65,12 +65,12 @@
         <button data-view="profile">👥 <span>Household & Members</span></button>
         <button data-action="logout">↪ <span>Log out</span></button>
       </div>
-      <div class="drawer-foot"><span>Local-first · Voice · Smart Analytics · Optional Cloud AI</span><b>v29</b></div>
+      <div class="drawer-foot"><span>Local-first · Voice · Smart Analytics · Optional Cloud AI</span><b>v32</b></div>
     </div>
   </aside>
 
   <div id="sheet" class="sheet" aria-hidden="true"><div class="sheet-card"><div class="sheet-grab"></div><div class="sheet-head"><div><small id="sheetKicker"></small><h3 id="sheetTitle"></h3></div><button class="round-btn" data-action="close-sheet">✕</button></div><div id="sheetBody"></div></div></div>
   <div id="toast" class="toast"></div>
-  <script src="app.js"></script>
+  <script src="app.js?v=33"></script>
 </body>
 </html>

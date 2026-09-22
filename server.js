@@ -36,11 +36,17 @@ const CLOUDFLARE_ACCOUNT_ID = env('CLOUDFLARE_ACCOUNT_ID');
 const CLOUDFLARE_API_TOKEN = env('CLOUDFLARE_API_TOKEN');
 const CLOUDFLARE_IMAGE_MODEL = env('CLOUDFLARE_IMAGE_MODEL', '@cf/black-forest-labs/flux-1-schnell');
 const CLOUDFLARE_IMAGE_STEPS = Math.min(8, Math.max(1, Number(env('CLOUDFLARE_IMAGE_STEPS', '4')) || 4));
+const CLOUDFLARE_SPEECH_MODEL = env('CLOUDFLARE_SPEECH_MODEL', '@cf/openai/whisper');
 const FIREBASE_API_KEY = env('FIREBASE_API_KEY');
 const MONGODB_URI = env('MONGODB_URI');
 const MONGODB_DB_NAME = env('MONGODB_DB_NAME', 'foodwise');
 const SESSION_SECRET = env('SESSION_SECRET');
 const NODE_ENV = env('NODE_ENV', 'development');
+const IS_PRODUCTION = NODE_ENV === 'production';
+const SESSION_MAX_DAYS = Math.max(1, Math.min(90, Number(env('SESSION_MAX_DAYS', '30')) || 30));
+const SESSION_MAX_AGE_SECONDS = SESSION_MAX_DAYS * 24 * 60 * 60;
+const MAX_JSON_BODY = 2 * 1024 * 1024;
+const MAX_AUDIO_BODY = 4 * 1024 * 1024;
 const LOCAL_MODE = String(env('LOCAL_MODE', (!MONGODB_URI || !FIREBASE_API_KEY) ? 'true' : 'false')).toLowerCase() === 'true';
 const LOCAL_STATE_FILE = path.join(ROOT, 'data', 'local-state.json');
 const LOCAL_AUTH_FILE = path.join(ROOT, 'data', 'local-auth.json');
@@ -49,7 +55,15 @@ const LOCAL_VAPID_FILE = path.join(ROOT, 'data', 'vapid.json');
 const LOCAL_LOGIN_EMAIL = env('LOCAL_LOGIN_EMAIL', 'local@foodwise.app').toLowerCase();
 const LOCAL_LOGIN_PASSWORD = env('LOCAL_LOGIN_PASSWORD', 'foodwise123');
 const LOCAL_USER_NAME = env('LOCAL_USER_NAME', 'Local FoodWise User');
-const LOCAL_SESSION_TOKEN = 'local-mode-v22';
+const LOCAL_SESSION_SECRET_FILE = path.join(ROOT, 'data', 'local-session-secret.txt');
+function readOrCreateLocalSessionToken() {
+  try { const x = fs.readFileSync(LOCAL_SESSION_SECRET_FILE, 'utf8').trim(); if (x.length >= 48) return x; } catch {}
+  const token = crypto.randomBytes(40).toString('hex');
+  fs.mkdirSync(path.dirname(LOCAL_SESSION_SECRET_FILE), { recursive: true });
+  fs.writeFileSync(LOCAL_SESSION_SECRET_FILE, token, { mode: 0o600 });
+  return token;
+}
+let LOCAL_SESSION_TOKEN = readOrCreateLocalSessionToken();
 const VAPID_SUBJECT = env('VAPID_SUBJECT', 'mailto:admin@foodwise.app');
 
 function localPasswordHash(password, salt) {
@@ -216,9 +230,12 @@ function cookies(req) {
   return Object.fromEntries(String(req.headers.cookie || '').split(';').map(x => x.trim()).filter(Boolean).map(part => { const i = part.indexOf('='); return i < 0 ? [part, ''] : [part.slice(0, i), decodeURIComponent(part.slice(i + 1))]; }));
 }
 function sessionHash(token='') {
-  const key = SESSION_SECRET || 'foodwise-dev-session-secret-change-me';
+  const key = SESSION_SECRET || (LOCAL_MODE ? LOCAL_SESSION_TOKEN : 'foodwise-dev-session-secret-change-me');
   return crypto.createHmac('sha256', key).update(String(token)).digest('hex');
 }
+function secureEqual(a='', b='') { const x=Buffer.from(String(a)), y=Buffer.from(String(b)); return x.length === y.length && crypto.timingSafeEqual(x,y); }
+const SESSION_COOKIE_NAME = IS_PRODUCTION ? '__Host-fw_session' : 'fw_session';
+function sessionTokenFromRequest(req) { return cookies(req)[SESSION_COOKIE_NAME] || ''; }
 function publicUser(user) {
   if (!user) return null;
   return { id: user._id || user.id, name: user.name || 'FoodWise User', email: user.email || '' };
@@ -327,7 +344,7 @@ async function connectMongo() {
   }
   if (!MongoClient) throw new Error('MongoDB package is not installed. Run npm install for cloud mode, or enable LOCAL_MODE=true.');
   if (!MONGODB_URI) throw new Error('MONGODB_URI is required. Add your MongoDB Atlas connection string in .env or enable LOCAL_MODE=true.');
-  if (!SESSION_SECRET || SESSION_SECRET.length < 24) console.warn('⚠ SESSION_SECRET should be at least 24 characters in production.');
+  if (!SESSION_SECRET || SESSION_SECRET.length < 32) throw new Error('SESSION_SECRET must be at least 32 characters in Cloud Mode. Use Render generateValue.');
   mongoClient = new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 12000, maxPoolSize: 10 });
   await mongoClient.connect();
   mongoDb = mongoClient.db(MONGODB_DB_NAME);
@@ -490,31 +507,31 @@ async function saveUserState(user, state) {
 }
 async function sessionUser(req) {
   if (LOCAL_MODE) {
-    const token = cookies(req).fw_session;
-    return token === LOCAL_SESSION_TOKEN ? localUser() : null;
+    const token = sessionTokenFromRequest(req);
+    return token && secureEqual(token, LOCAL_SESSION_TOKEN) ? localUser() : null;
   }
-  const token = cookies(req).fw_session;
+  const token = sessionTokenFromRequest(req);
   if (!token) return null;
   const now = new Date();
   const session = await sessionsCol.findOne({ _id: sessionHash(token), expiresAt: { $gt: now } });
   if (!session) return null;
   return usersCol.findOne({ _id: String(session.userId) });
 }
-function sessionCookie(token, maxAge = 315360000) {
-  const secure = NODE_ENV === 'production' ? '; Secure' : '';
-  return `fw_session=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secure}`;
+function sessionCookie(token, maxAge = SESSION_MAX_AGE_SECONDS) {
+  const secure = IS_PRODUCTION ? '; Secure' : '';
+  return `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.max(0, Number(maxAge) || 0)}; Priority=High${secure}`;
 }
 async function createSession(userId) {
   if (LOCAL_MODE) return sessionCookie(LOCAL_SESSION_TOKEN);
-  const token = crypto.randomBytes(40).toString('hex');
+  const token = crypto.randomBytes(48).toString('base64url');
   const now = new Date();
-  const expiresAt = new Date(Date.now() + 10 * 365 * 86400000);
+  const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_SECONDS * 1000);
   await sessionsCol.insertOne({ _id: sessionHash(token), userId: String(userId), createdAt: now, expiresAt });
   return sessionCookie(token);
 }
 async function destroySession(req) {
   if (LOCAL_MODE) return;
-  const token = cookies(req).fw_session;
+  const token = sessionTokenFromRequest(req);
   if (token) await sessionsCol.deleteOne({ _id: sessionHash(token) });
 }
 
@@ -530,7 +547,7 @@ function firebaseFriendlyError(code = '') {
     INVALID_LOGIN_CREDENTIALS: 'Invalid email or password.',
     USER_DISABLED: 'This account has been disabled.',
     INVALID_EMAIL: 'Please enter a valid email address.',
-    WEAK_PASSWORD: 'Password must be at least 6 characters.',
+    WEAK_PASSWORD: 'Use at least 10 characters with letters and numbers.',
     API_KEY_INVALID: 'Firebase API key is invalid or restricted for this request.'
   };
   return map[c] || code || 'Firebase Authentication request failed';
@@ -556,20 +573,83 @@ async function firebaseSignIn(email, password) { return firebaseAuthCall('signIn
 async function firebaseDelete(idToken) { if (idToken) { try { await firebaseAuthCall('delete', { idToken }); } catch {} } }
 async function firebaseSendPasswordReset(email) { return firebaseAuthCall('sendOobCode', { requestType: 'PASSWORD_RESET', email }); }
 async function firebaseChangePassword(idToken, password) { return firebaseAuthCall('update', { idToken, password, returnSecureToken: true }); }
+function applySecurityHeaders(req, res) {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Permissions-Policy', 'camera=(), geolocation=(), payment=(), usb=(), microphone=(self)');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
+  res.setHeader('Content-Security-Policy', `default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; form-action 'self'; img-src 'self' data: blob: https:; media-src 'self' blob:; connect-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; manifest-src 'self'; font-src 'self' data:${IS_PRODUCTION ? '; upgrade-insecure-requests' : ''}`);
+  if (IS_PRODUCTION) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+}
+function requestOriginAllowed(req) {
+  const method = String(req.method || 'GET').toUpperCase();
+  if (!['POST','PUT','PATCH','DELETE'].includes(method)) return true;
+  const fetchSite = String(req.headers['sec-fetch-site'] || '').toLowerCase();
+  if (fetchSite && !['same-origin','none'].includes(fetchSite)) return false;
+  const proto = String(req.headers['x-forwarded-proto'] || (req.socket?.encrypted ? 'https' : 'http')).split(',')[0].trim();
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+  const expected = host ? `${proto}://${host}` : '';
+  const origin = String(req.headers.origin || '').trim();
+  if (origin && expected) { try { return new URL(origin).origin === expected; } catch { return false; } }
+  const referer = String(req.headers.referer || '').trim();
+  if (referer && expected) { try { return new URL(referer).origin === expected; } catch { return false; } }
+  return true; // allows CLI/server-to-server requests without browser origin headers
+}
+const RATE_BUCKETS = new Map();
+function clientIp(req) { return String(req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || req.socket?.remoteAddress || 'unknown').split(',')[0].trim().slice(0, 120); }
+function enforceRateLimit(req, scope, limit, windowMs, identity='') {
+  const now = Date.now(), key = `${scope}|${clientIp(req)}|${String(identity).slice(0,180)}`;
+  let rec = RATE_BUCKETS.get(key);
+  if (!rec || rec.resetAt <= now) rec = { count: 0, resetAt: now + windowMs };
+  rec.count += 1; RATE_BUCKETS.set(key, rec);
+  if (RATE_BUCKETS.size > 5000) for (const [k,v] of RATE_BUCKETS) if (v.resetAt <= now) RATE_BUCKETS.delete(k);
+  if (rec.count > limit) {
+    const e = new Error('Too many requests. Please wait and try again.');
+    e.status = 429; e.retryAfter = Math.max(1, Math.ceil((rec.resetAt - now) / 1000)); throw e;
+  }
+}
+function sanitizeJson(value, depth=0, maxString=MAX_JSON_BODY) {
+  if (depth > 16) return null;
+  if (value == null || typeof value === 'boolean') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+  if (typeof value === 'string') return value.slice(0, maxString);
+  if (Array.isArray(value)) return value.slice(0, 1000).map(v => sanitizeJson(v, depth + 1, maxString));
+  if (typeof value === 'object') {
+    const out = {}; let n = 0;
+    for (const [k,v] of Object.entries(value)) {
+      if (['__proto__','prototype','constructor'].includes(k) || n++ >= 500) continue;
+      out[String(k).slice(0,120)] = sanitizeJson(v, depth + 1, maxString);
+    }
+    return out;
+  }
+  return null;
+}
 function send(res, status, data, type = 'application/json; charset=utf-8', extraHeaders = {}) {
   const body = type.startsWith('application/json') ? JSON.stringify(data) : data;
-  res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store', ...extraHeaders });
+  const headers = { 'Content-Type': type, 'Cache-Control': 'no-store', ...extraHeaders };
+  if (status === 429 && data?.retryAfter) headers['Retry-After'] = String(data.retryAfter);
+  res.writeHead(status, headers);
   res.end(body);
 }
-function parseBody(req) {
+function parseBody(req, limit = MAX_JSON_BODY) {
   return new Promise((resolve, reject) => {
-    let b = '';
-    req.on('data', c => { b += c; if (b.length > 2e6) req.destroy(); });
-    req.on('end', () => { try { resolve(b ? JSON.parse(b) : {}); } catch (e) { reject(e); } });
+    const contentType = String(req.headers['content-type'] || '').toLowerCase();
+    if (req.headers['content-length'] && Number(req.headers['content-length']) > limit) return reject(Object.assign(new Error('Request body is too large'), { status: 413 }));
+    if (contentType && !contentType.includes('application/json')) return reject(Object.assign(new Error('Content-Type must be application/json'), { status: 415 }));
+    const chunks = []; let size = 0, tooLarge = false;
+    req.on('data', c => { size += c.length; if (size > limit) { tooLarge = true; chunks.length = 0; } else if (!tooLarge) chunks.push(c); });
+    req.on('end', () => {
+      if (tooLarge) return reject(Object.assign(new Error('Request body is too large'), { status: 413 }));
+      try { const raw = Buffer.concat(chunks).toString('utf8'); resolve(sanitizeJson(raw ? JSON.parse(raw) : {}, 0, limit)); }
+      catch { reject(Object.assign(new Error('Invalid JSON request body'), { status: 400 })); }
+    });
     req.on('error', reject);
   });
 }
 function safeText(value, max = 120) { return String(value || '').trim().slice(0, max); }
+function strongPassword(password='') { const p=String(password); return p.length >= 10 && /[A-Za-z]/.test(p) && /\d/.test(p); }
 function slug(value) { return safeText(value, 80).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 45) || 'food'; }
 function hash(value) { return crypto.createHash('sha1').update(value).digest('hex').slice(0, 10); }
 
@@ -614,6 +694,33 @@ async function geminiGenerateWithFallback(kind, body) {
   throw lastErr || new Error('No usable Gemini text model found');
 }
 
+
+async function transcribeAudioBase64(audioBase64, mimeType='audio/webm', language='') {
+  const data = String(audioBase64 || '').replace(/^data:[^;]+;base64,/, '');
+  if (!data || data.length > 2_600_000) throw Object.assign(new Error('Audio clip is empty or too large'), { status: 400 });
+  const mime = safeText(mimeType || 'audio/webm', 80) || 'audio/webm';
+  if (GEMINI_API_KEY) {
+    const prompt = `Transcribe this short FoodWise voice command exactly as spoken. The speaker may use Hindi, Hinglish, English, Marathi or another Indian language. Do not explain, translate, add punctuation commentary, or answer the command. Return only the spoken words.`;
+    try {
+      const { data: response, model } = await geminiGenerateWithFallback('text', {
+        contents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: mime, data } }] }],
+        generationConfig: { temperature: 0, maxOutputTokens: 180 }
+      });
+      const text = response?.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('').trim();
+      if (text) return { text, provider: 'Gemini audio', model };
+    } catch (err) { console.warn('Gemini audio transcription failed:', err.message); }
+  }
+  if (cloudflareConfigured()) {
+    const endpoint = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(CLOUDFLARE_ACCOUNT_ID)}/ai/run/${CLOUDFLARE_SPEECH_MODEL}`;
+    const audio = Buffer.from(data, 'base64');
+    const response = await fetch(endpoint, { method: 'POST', headers: { 'Authorization': `Bearer ${CLOUDFLARE_API_TOKEN}`, 'Content-Type': mime }, body: audio, signal: AbortSignal.timeout(45000) });
+    const out = await response.json().catch(() => ({}));
+    if (!response.ok || out?.success === false) throw Object.assign(new Error(out?.errors?.[0]?.message || `Cloudflare speech HTTP ${response.status}`), { status: response.status });
+    const text = String(out?.result?.text || out?.text || '').trim();
+    if (text) return { text, provider: 'Cloudflare Workers AI', model: CLOUDFLARE_SPEECH_MODEL };
+  }
+  throw Object.assign(new Error('Voice transcription needs GEMINI_API_KEY or Cloudflare AI credentials on Render'), { status: 503 });
+}
 
 function cloudflareConfigured() {
   return Boolean(CLOUDFLARE_ACCOUNT_ID && CLOUDFLARE_API_TOKEN);
@@ -1340,23 +1447,28 @@ const productMap = {
 };
 
 const server = http.createServer(async (req, res) => {
+  applySecurityHeaders(req, res);
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   try {
+    if (['TRACE','CONNECT'].includes(String(req.method || '').toUpperCase())) return send(res, 405, { error: 'Method not allowed' }, 'application/json; charset=utf-8', { 'Allow': 'GET, POST, PUT, HEAD' });
+    if (!requestOriginAllowed(req)) return send(res, 403, { error: 'Cross-site request blocked' });
     if (url.pathname === '/api/health') {
       let mongo = LOCAL_MODE ? 'local-json' : 'disconnected';
       if (!LOCAL_MODE) { try { await mongoDb.command({ ping: 1 }); mongo = 'connected'; } catch {} }
       const ok = LOCAL_MODE || mongo === 'connected';
-      return send(res, ok ? 200 : 503, { ok, app: 'FoodWise Pro v29 · Mobile Notifications + Clean Header + Shopping Q&A Removed', mode: LOCAL_MODE ? 'local' : 'cloud', storage: LOCAL_MODE ? 'JSON file' : 'MongoDB', mongo, firebaseConfigured: firebaseConfigured(), pushConfigured: Boolean(webPush && vapidKeys), time: new Date().toISOString() });
+      return send(res, ok ? 200 : 503, { ok, app: 'FoodWise Pro v32', time: new Date().toISOString() });
     }
-    if (url.pathname === '/api/config') return send(res, 200, { localMode: LOCAL_MODE, geminiConfigured: Boolean(GEMINI_API_KEY), cloudflareConfigured: cloudflareConfigured(), firebaseConfigured: firebaseConfigured(), database: LOCAL_MODE ? 'Local JSON' : 'MongoDB', imageProvider: cloudflareConfigured() ? 'Cloudflare Workers AI' : 'Local food assets', imageModel: activeImageModel, textModel: GEMINI_API_KEY ? activeTextModel : 'FoodWise local AI', apiVersion: GEMINI_API_VERSION });
+    if (url.pathname === '/api/config') return send(res, 200, { localMode: LOCAL_MODE, geminiConfigured: Boolean(GEMINI_API_KEY), cloudflareConfigured: cloudflareConfigured(), speechTranscriptionConfigured: Boolean(GEMINI_API_KEY || cloudflareConfigured()), firebaseConfigured: firebaseConfigured(), database: LOCAL_MODE ? 'Local JSON' : 'Cloud database', imageProvider: cloudflareConfigured() ? 'AI images' : 'Local food assets', imageModel: cloudflareConfigured() ? 'Connected' : 'Local', textModel: GEMINI_API_KEY ? 'Connected' : 'FoodWise local AI', apiVersion: 'secured' });
     if (url.pathname.startsWith('/api/images/') && req.method === 'GET') {
+      const imageUser = await sessionUser(req);
+      if (!imageUser) return send(res, 401, { error: 'Login required' });
       if (LOCAL_MODE || !imageFilesCol || !imagesBucket) return send(res, 404, { error: 'Generated image storage is unavailable in local mode' });
       const rawId = url.pathname.split('/').pop();
       if (!ObjectId.isValid(rawId)) return send(res, 404, { error: 'Image not found' });
       const oid = new ObjectId(rawId);
       const file = await imageFilesCol.findOne({ _id: oid });
       if (!file) return send(res, 404, { error: 'Image not found' });
-      res.writeHead(200, { 'Content-Type': file.metadata?.mime || 'image/jpeg', 'Cache-Control': 'public, max-age=604800, immutable' });
+      res.writeHead(200, { 'Content-Type': file.metadata?.mime || 'image/jpeg', 'Cache-Control': 'private, max-age=604800, immutable' });
       const stream = imagesBucket.openDownloadStream(oid);
       stream.on('error', () => { if (!res.headersSent) send(res, 404, { error: 'Image not found' }); else res.destroy(); });
       return stream.pipe(res);
@@ -1366,7 +1478,9 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { authenticated: Boolean(user), user: publicUser(user) });
     }
     if (url.pathname === '/api/auth/login' && req.method === 'POST') {
+      enforceRateLimit(req, 'auth-login-ip', 20, 15*60*1000);
       const b = await parseBody(req);
+      enforceRateLimit(req, 'auth-login-account', 8, 15*60*1000, safeText(b.email,160).toLowerCase());
       if (LOCAL_MODE) {
         const email = safeText(b.email, 160).toLowerCase();
         const password = String(b.password || '');
@@ -1391,12 +1505,13 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, user: publicUser(user) }, 'application/json; charset=utf-8', { 'Set-Cookie': cookie });
     }
     if (url.pathname === '/api/auth/signup' && req.method === 'POST') {
+      enforceRateLimit(req, 'auth-signup', 5, 60*60*1000);
       const b = await parseBody(req);
       if (LOCAL_MODE) {
         const name = safeText(b.name, 80), email = safeText(b.email, 160).toLowerCase(), password = String(b.password || '');
         const householdName = safeText(b.householdName, 100);
         const members = Math.max(1, Math.min(20, Number(b.members || 1)));
-        if (!name || !email.includes('@') || password.length < 6) return send(res, 400, { error: 'Name, valid email and 6+ character password are required' });
+        if (!name || !email.includes('@') || !strongPassword(password)) return send(res, 400, { error: 'Name, valid email and a 10+ character password containing letters and numbers are required' });
         const rec = writeLocalAuth({ name, email, password });
         const user = localUser(rec);
         const initial = initialStateForUser(user, { name, householdName, members });
@@ -1408,7 +1523,7 @@ const server = http.createServer(async (req, res) => {
       const name = safeText(b.name, 80), email = safeText(b.email, 160).toLowerCase(), password = String(b.password || '');
       const householdName = safeText(b.householdName, 100);
       const members = Math.max(1, Math.min(20, Number(b.members || 1)));
-      if (!name || !email.includes('@') || password.length < 6) return send(res, 400, { error: 'Name, valid email and 6+ character password are required' });
+      if (!name || !email.includes('@') || !strongPassword(password)) return send(res, 400, { error: 'Name, valid email and a 10+ character password containing letters and numbers are required' });
       let fb;
       try { fb = await firebaseSignUp(email, password); }
       catch (err) { return send(res, err.status || 400, { error: err.message }); }
@@ -1425,6 +1540,7 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, user: publicUser(user) }, 'application/json; charset=utf-8', { 'Set-Cookie': cookie });
     }
     if (url.pathname === '/api/auth/forgot-password' && req.method === 'POST') {
+      enforceRateLimit(req, 'auth-reset', 5, 15*60*1000);
       const b = await parseBody(req);
       const email = safeText(b.email, 160).toLowerCase();
       if (!email.includes('@')) return send(res, 400, { error: 'Please enter a valid email address' });
@@ -1449,10 +1565,11 @@ const server = http.createServer(async (req, res) => {
     const user = url.pathname.startsWith('/api/') ? await sessionUser(req) : null;
     if (url.pathname.startsWith('/api/') && !user) return send(res, 401, { error: 'Login required' });
     if (url.pathname === '/api/auth/change-password' && req.method === 'POST') {
+      enforceRateLimit(req, 'change-password', 5, 15*60*1000, String(user._id || user.id));
       const b = await parseBody(req);
       const currentPassword = String(b.currentPassword || '');
       const newPassword = String(b.newPassword || '');
-      if (!currentPassword || newPassword.length < 6) return send(res, 400, { error: 'Current password and a new password of at least 6 characters are required' });
+      if (!currentPassword || !strongPassword(newPassword)) return send(res, 400, { error: 'Current password and a new 10+ character password containing letters and numbers are required' });
       if (currentPassword === newPassword) return send(res, 400, { error: 'New password must be different from the current password' });
       if (LOCAL_MODE) {
         const rec = readLocalAuth();
@@ -1466,17 +1583,20 @@ const server = http.createServer(async (req, res) => {
       catch (err) { return send(res, 401, { error: 'Current password is incorrect' }); }
       try { await firebaseChangePassword(fb.idToken, newPassword); }
       catch (err) { return send(res, err.status || 400, { error: err.message }); }
-      return send(res, 200, { ok: true, message: 'Firebase password updated successfully' });
+      await sessionsCol.deleteMany({ userId: String(user._id || user.id) });
+      const cookie = await createSession(String(user._id || user.id));
+      return send(res, 200, { ok: true, message: 'Password updated. Other sessions were signed out.' }, 'application/json; charset=utf-8', { 'Set-Cookie': cookie });
     }
     if (url.pathname === '/api/push/config' && req.method === 'GET') return send(res, 200, { supported: Boolean(webPush && vapidKeys), publicKey: vapidKeys?.publicKey || '' });
     if (url.pathname === '/api/push/subscribe' && req.method === 'POST') { const b = await parseBody(req); if (!b.subscription?.endpoint) return send(res, 400, { error: 'Push subscription is required' }); await savePushSubscription(String(user._id || user.id), b.subscription); return send(res, 200, { ok: true }); }
     if (url.pathname === '/api/push/unsubscribe' && req.method === 'POST') { const b = await parseBody(req); await removePushSubscription(b.endpoint || b.subscription?.endpoint || ''); return send(res, 200, { ok: true }); }
-    if (url.pathname === '/api/push/test' && req.method === 'POST') { const sent = await sendPushToUser(String(user._id || user.id), { title: 'FoodWise test notification', body: 'Mobile notifications are connected and working.', tag: 'foodwise-test', url: '/?view=notifications' }); return send(res, 200, { ok: true, sent }); }
+    if (url.pathname === '/api/push/test' && req.method === 'POST') { enforceRateLimit(req, 'push-test', 10, 60*1000, String(user._id || user.id)); const sent = await sendPushToUser(String(user._id || user.id), { title: 'FoodWise test notification', body: 'Mobile notifications are connected and working.', tag: 'foodwise-test', url: '/?view=notifications' }); return send(res, 200, { ok: true, sent }); }
     if (url.pathname === '/api/push/check' && req.method === 'POST') { const st = await getUserState(user); const sent = await sendDuePushAlertsForUser(String(user._id || user.id), st); return send(res, 200, { ok: true, sent }); }
     if (url.pathname === '/api/state' && req.method === 'GET') return send(res, 200, await getUserState(user));
-    if (url.pathname === '/api/state' && req.method === 'PUT') { const body = await parseBody(req); const saved = await saveUserState(user, body); sendDuePushAlertsForUser(String(user._id || user.id), saved).catch(()=>{}); return send(res, 200, { ok: true }); }
+    if (url.pathname === '/api/state' && req.method === 'PUT') { enforceRateLimit(req, 'state-write', 180, 60*1000, String(user._id || user.id)); const body = await parseBody(req); const saved = await saveUserState(user, body); sendDuePushAlertsForUser(String(user._id || user.id), saved).catch(()=>{}); return send(res, 200, { ok: true }); }
     if (url.pathname === '/api/reset' && req.method === 'POST') { const fresh = LOCAL_MODE ? migrateState(seed(), localUser()) : initialStateForUser(user, { name: user.name, members: 1, householdName: `${user.name || 'My'}'s Household` }); await saveUserState(user, fresh); return send(res, 200, fresh); }
     if (url.pathname === '/api/ai' && req.method === 'POST') {
+      enforceRateLimit(req, 'ai', 40, 60*1000, String(user._id || user.id));
       const b = await parseBody(req); const st = await getUserState(user);
       if (!GEMINI_API_KEY) {
         const local = aiReply(b.question, st, b.language);
@@ -1499,13 +1619,21 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, { ok: true, configured: true, model, message: text || 'Gemini connection successful' });
       } catch (err) { return send(res, 200, { ok: false, configured: true, model: activeTextModel, message: err.message, status: err.status || 500 }); }
     }
+    if (url.pathname === '/api/speech/transcribe' && req.method === 'POST') {
+      enforceRateLimit(req, 'speech', 20, 60*1000, String(user._id || user.id));
+      const b = await parseBody(req, MAX_AUDIO_BODY);
+      try { const result = await transcribeAudioBase64(b.audioBase64, b.mimeType, b.language); return send(res, 200, { ok: true, ...result }); }
+      catch (err) { return send(res, err.status || 500, { error: err.message || 'Speech transcription failed' }); }
+    }
     if (url.pathname === '/api/food-image' && req.method === 'POST') {
+      enforceRateLimit(req, 'food-image', 15, 60*1000, String(user._id || user.id));
       const b = await parseBody(req);
       if (!cloudflareConfigured()) return send(res, 503, { error: 'Cloudflare image AI not configured', setup: 'Add CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN in Render Environment/.env' });
       const result = await generateFoodImage(b.name, b.quantity);
       return send(res, 200, { ok: true, ...result });
     }
     if (url.pathname === '/api/meal-image' && req.method === 'POST') {
+      enforceRateLimit(req, 'meal-image', 15, 60*1000, String(user._id || user.id));
       const b = await parseBody(req);
       if (!cloudflareConfigured()) return send(res, 503, { error: 'Cloudflare image AI not configured', setup: 'Add CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN in Render Environment/.env' });
       const result = await generateMealImage(b.name, b.ingredients);
@@ -1525,8 +1653,9 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/api/product' && req.method === 'GET') { const code = url.searchParams.get('barcode') || ''; return send(res, 200, { found: !!productMap[code], product: productMap[code] || null, barcode: code }); }
 
-    let filePath = url.pathname === '/' ? path.join(PUBLIC, 'index.html') : path.join(PUBLIC, decodeURIComponent(url.pathname));
-    if (!filePath.startsWith(PUBLIC)) return send(res, 403, { error: 'Forbidden' });
+    const decodedPath = decodeURIComponent(url.pathname);
+    let filePath = url.pathname === '/' ? path.join(PUBLIC, 'index.html') : path.resolve(PUBLIC, `.${decodedPath}`);
+    if (filePath !== PUBLIC && !filePath.startsWith(PUBLIC + path.sep)) return send(res, 403, { error: 'Forbidden' });
     if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
       const ext = path.extname(filePath).toLowerCase();
       const types = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.ico': 'image/x-icon' };
@@ -1537,8 +1666,9 @@ const server = http.createServer(async (req, res) => {
     send(res, 404, { error: 'Not found' });
   } catch (err) {
     console.error(err);
-    const status = err.status === 429 ? 429 : err.status === 401 || err.status === 403 ? 502 : 500;
-    send(res, status, { error: 'Server error', message: err.message });
+    const status = [400,401,403,404,405,413,415,429].includes(Number(err.status)) ? Number(err.status) : 500;
+    const message = status === 500 && IS_PRODUCTION ? 'Unexpected server error' : (err.message || 'Server error');
+    send(res, status, { error: message, ...(status === 429 ? { retryAfter: err.retryAfter || 60 } : {}) });
   }
 });
 
@@ -1559,7 +1689,7 @@ async function startServer() {
     const pushTimer=setInterval(()=>runPushNotificationSweep().catch(()=>{}), 5*60*1000);
     pushTimer.unref?.();
     server.listen(PORT, () => {
-      console.log('\n  FoodWise Pro v29 · Mobile Notifications + Clean Header + Shopping Q&A Removed ✅');
+      console.log('\n  FoodWise Pro v32 · Security Hardened ✅');
       console.log(`  URL:     http://localhost:${PORT}`);
       console.log(`  Health:  http://localhost:${PORT}/api/health`);
       console.log(`  Mode:    ${LOCAL_MODE ? 'LOCAL · JSON storage · login gate enabled' : `CLOUD · MongoDB ${MONGODB_DB_NAME}`}`);
