@@ -1,0 +1,13 @@
+FoodWise Pro v22 QA — Voice Inventory + Planner Images
+
+PASS: public/app.js syntax checked with Node.
+PASS: server.js syntax checked with Node.
+PASS: Local server starts successfully on http://localhost:3000.
+PASS: /api/health returns FoodWise Pro v22 in Local Mode.
+PASS: /api/config returns valid local configuration.
+PASS: index renders v22 label.
+PASS: voice command extraction handles "inventory mein daal add kar du", "dal inventory me add karo", "inventory mein rice add kar do", and "add dal to inventory".
+PASS: voice inventory includes quantity, storage, expiry, cost and final confirmation stages.
+PASS: smart planner maps dal + rice to Dal Chawal.
+PASS: planner requests /api/meal-image when Cloudflare image AI is configured.
+PASS: PWA cache key bumped to v22.

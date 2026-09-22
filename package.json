@@ -1,8 +1,8 @@
 {
   "name": "foodwise-pro-local-first",
-  "version": "21.0.0",
+  "version": "22.0.0",
   "private": true,
-  "description": "FoodWise Pro v21: dark-first PWA with editable profile photo, instant language switching, secure password change, Firebase auth/reset, MongoDB cloud storage and Render deployment.",
+  "description": "FoodWise Pro v22: conversational voice inventory and smart planner meal images; dark-first PWA with editable profile photo, instant language switching, secure password change, Firebase auth/reset, MongoDB cloud storage and Render deployment.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
