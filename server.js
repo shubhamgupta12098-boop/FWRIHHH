@@ -3,8 +3,9 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
-let MongoClient=null, GridFSBucket=null, ObjectId=null;
+let MongoClient=null, GridFSBucket=null, ObjectId=null, webPush=null;
 try { ({ MongoClient, GridFSBucket, ObjectId } = require('mongodb')); } catch { /* Local Mode runs with Node.js built-ins only. */ }
+try { webPush = require('web-push'); } catch { /* Push stays optional until npm install installs web-push. */ }
 
 const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, 'public');
@@ -43,10 +44,13 @@ const NODE_ENV = env('NODE_ENV', 'development');
 const LOCAL_MODE = String(env('LOCAL_MODE', (!MONGODB_URI || !FIREBASE_API_KEY) ? 'true' : 'false')).toLowerCase() === 'true';
 const LOCAL_STATE_FILE = path.join(ROOT, 'data', 'local-state.json');
 const LOCAL_AUTH_FILE = path.join(ROOT, 'data', 'local-auth.json');
+const LOCAL_PUSH_FILE = path.join(ROOT, 'data', 'local-push.json');
+const LOCAL_VAPID_FILE = path.join(ROOT, 'data', 'vapid.json');
 const LOCAL_LOGIN_EMAIL = env('LOCAL_LOGIN_EMAIL', 'local@foodwise.app').toLowerCase();
 const LOCAL_LOGIN_PASSWORD = env('LOCAL_LOGIN_PASSWORD', 'foodwise123');
 const LOCAL_USER_NAME = env('LOCAL_USER_NAME', 'Local FoodWise User');
 const LOCAL_SESSION_TOKEN = 'local-mode-v22';
+const VAPID_SUBJECT = env('VAPID_SUBJECT', 'mailto:admin@foodwise.app');
 
 function localPasswordHash(password, salt) {
   return crypto.pbkdf2Sync(String(password), String(salt), 120000, 32, 'sha256').toString('hex');
@@ -92,9 +96,52 @@ function day(offset = 0) {
   return d.toISOString().slice(0, 10);
 }
 
+const CONSUMED_RETENTION_DAYS = 7;
+const CONSUMED_RETENTION_MS = CONSUMED_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+function consumedTimestamp(x = {}) {
+  const raw = x.consumedAt || (x.consumedDate ? `${x.consumedDate}T12:00:00Z` : '');
+  const t = Date.parse(raw);
+  return Number.isFinite(t) ? t : Date.now();
+}
+function reportConsumedRow(x = {}) {
+  return {
+    name: safeText(x.name || 'Food item', 120) || 'Food item',
+    qty: safeText(x.qty || '', 80),
+    consumedDate: safeText(x.consumedDate || String(x.consumedAt || '').slice(0, 10) || day(0), 20),
+    expiry: safeText(x.expiry || '', 20),
+    cost: Math.max(0, Number(x.cost || 0))
+  };
+}
+function reportConsumedKey(x = {}) {
+  return [String(x.name || '').toLowerCase(), x.qty || '', x.consumedDate || '', x.expiry || '', Number(x.cost || 0).toFixed(2)].join('|');
+}
+function enforceConsumedRetention(st, now = Date.now()) {
+  if (!st || typeof st !== 'object') return false;
+  st.reportArchive = st.reportArchive && typeof st.reportArchive === 'object' && !Array.isArray(st.reportArchive) ? st.reportArchive : {};
+  const rawArchive = Array.isArray(st.reportArchive.consumed) ? st.reportArchive.consumed : [];
+  const archive = rawArchive.map(reportConsumedRow);
+  const keys = new Set(archive.map(reportConsumedKey));
+  const keep = [];
+  let changed = archive.length !== rawArchive.length;
+  for (const item of Array.isArray(st.consumed) ? st.consumed : []) {
+    if (now - consumedTimestamp(item) >= CONSUMED_RETENTION_MS) {
+      const row = reportConsumedRow(item);
+      const key = reportConsumedKey(row);
+      if (!keys.has(key)) { archive.push(row); keys.add(key); }
+      changed = true;
+    } else keep.push(item);
+  }
+  archive.sort((a, b) => String(b.consumedDate || '').localeCompare(String(a.consumedDate || '')));
+  if (!Array.isArray(st.consumed) || keep.length !== st.consumed.length) changed = true;
+  if (JSON.stringify(rawArchive) !== JSON.stringify(archive)) changed = true;
+  st.consumed = keep;
+  st.reportArchive.consumed = archive;
+  return changed;
+}
+
 function seed() {
   return {
-    version: 22,
+    version: 29,
     household: { name: 'Sharma Household', members: 4, currentServings: 4, budget: 9000, spent: 5240, veg: 'Mixed', allergies: 'Peanuts', theme: 'dark', notifications: true, weeklyGoal: 25, address: 'Home · Thane, Maharashtra', deliveryNote: '', memberProfiles: [
       { id: 1, name: 'Shubham', role: 'Admin', appetite: 'Regular', active: true },
       { id: 2, name: 'Mom', role: 'Adult', appetite: 'Regular', active: true },
@@ -103,6 +150,8 @@ function seed() {
     ] },
     mealServings: {},
     mealImages: {},
+    chatHistory: [],
+    reportArchive: { consumed: [] },
     stats: { points: 1280, streak: 6, savedMoney: 860, savedKg: 7.4, co2: 18.6, water: 3200, level: 7 },
     inventory: [
       { id: 101, name: 'Spinach', emoji: '🥬', qty: '1 bunch', place: 'Fridge', category: 'Produce', purchase: day(-3), expiry: day(0), cost: 45 },
@@ -158,6 +207,10 @@ let statesCol = null;
 let sessionsCol = null;
 let imageFilesCol = null;
 let imagesBucket = null;
+let pushSubsCol = null;
+let settingsCol = null;
+let pushAlertsCol = null;
+let vapidKeys = null;
 
 function cookies(req) {
   return Object.fromEntries(String(req.headers.cookie || '').split(';').map(x => x.trim()).filter(Boolean).map(part => { const i = part.indexOf('='); return i < 0 ? [part, ''] : [part.slice(0, i), decodeURIComponent(part.slice(i + 1))]; }));
@@ -201,6 +254,8 @@ function initialStateForUser(user = {}, options = {}) {
   st.meals = {};
   st.mealServings = {};
   st.mealImages = {};
+  st.chatHistory = [];
+  st.reportArchive = { consumed: [] };
   st.savedRecipes = [];
   st.challenges = (st.challenges || []).map(x => ({ ...x, progress: 0 }));
   st.cart = [];
@@ -213,7 +268,7 @@ function migrateState(input, user = {}) {
   const previousVersion = Number(db.version || 0);
   delete db.auth;
   delete db.shares;
-  db.version = 22;
+  db.version = 29;
   db.household = db.household || {};
   if (!Array.isArray(db.household.memberProfiles) || !db.household.memberProfiles.length) {
     const n = Math.max(1, Number(db.household.members || 1));
@@ -229,7 +284,9 @@ function migrateState(input, user = {}) {
   if (!db.meals || typeof db.meals !== 'object' || Array.isArray(db.meals)) db.meals = {};
   if (!db.mealIngredients || typeof db.mealIngredients !== 'object' || Array.isArray(db.mealIngredients)) db.mealIngredients = {};
   if (!db.mealImages || typeof db.mealImages !== 'object' || Array.isArray(db.mealImages)) db.mealImages = {};
-  for (const k of ['inventory','consumed','leftovers','shopping','waste','recipes','challenges','cart','orders','savedRecipes','dailyEssentials']) if (!Array.isArray(db[k])) db[k] = [];
+  for (const k of ['inventory','consumed','leftovers','shopping','waste','recipes','challenges','cart','orders','savedRecipes','dailyEssentials','chatHistory']) if (!Array.isArray(db[k])) db[k] = [];
+  db.chatHistory = db.chatHistory.filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.text === 'string').slice(-100).map(m => ({ id: safeText(m.id || '', 80), role: m.role, text: safeText(m.text, 12000), youtubeSearchUrl: safeText(m.youtubeSearchUrl || '', 2000), youtubeQuery: safeText(m.youtubeQuery || '', 300), warning: safeText(m.warning || '', 1000), createdAt: safeText(m.createdAt || '', 80) }));
+  enforceConsumedRetention(db);
   // v15 planner is inventory-locked: discard legacy/free-text meal slots that do not reference live inventory IDs.
   const liveIds = new Set(db.inventory.filter(x => !x?.expiry || String(x.expiry) >= day(0)).map(x => String(x.id)));
   for (const [d, meals] of Object.entries(db.meals)) {
@@ -278,26 +335,151 @@ async function connectMongo() {
   statesCol = mongoDb.collection('states');
   sessionsCol = mongoDb.collection('sessions');
   imageFilesCol = mongoDb.collection('foodwise_images.files');
+  pushSubsCol = mongoDb.collection('push_subscriptions');
+  settingsCol = mongoDb.collection('app_settings');
+  pushAlertsCol = mongoDb.collection('push_alerts');
   imagesBucket = new GridFSBucket(mongoDb, { bucketName: 'foodwise_images' });
   await Promise.all([
     usersCol.createIndex({ email: 1 }, { unique: true }),
     sessionsCol.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     sessionsCol.createIndex({ userId: 1 }),
     statesCol.createIndex({ updatedAt: -1 }),
-    imageFilesCol.createIndex({ filename: 1 })
+    imageFilesCol.createIndex({ filename: 1 }),
+    pushSubsCol.createIndex({ endpoint: 1 }, { unique: true }),
+    pushSubsCol.createIndex({ userId: 1 }),
+    pushAlertsCol.createIndex({ userId: 1, key: 1 }, { unique: true }),
+    pushAlertsCol.createIndex({ createdAt: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 45 })
   ]);
   await mongoDb.command({ ping: 1 });
 }
+async function initWebPush() {
+  if (!webPush) { console.warn('⚠ web-push package not available; background mobile push disabled.'); return false; }
+  let publicKey = env('VAPID_PUBLIC_KEY'), privateKey = env('VAPID_PRIVATE_KEY');
+  if (!publicKey || !privateKey) {
+    if (LOCAL_MODE) {
+      try {
+        const saved = JSON.parse(fs.readFileSync(LOCAL_VAPID_FILE, 'utf8'));
+        publicKey = saved.publicKey || ''; privateKey = saved.privateKey || '';
+      } catch {}
+      if (!publicKey || !privateKey) {
+        const generated = webPush.generateVAPIDKeys();
+        publicKey = generated.publicKey; privateKey = generated.privateKey;
+        fs.mkdirSync(path.dirname(LOCAL_VAPID_FILE), { recursive: true });
+        fs.writeFileSync(LOCAL_VAPID_FILE, JSON.stringify({ publicKey, privateKey }, null, 2));
+      }
+    } else {
+      const saved = await settingsCol.findOne({ _id: 'vapid' });
+      publicKey = saved?.publicKey || ''; privateKey = saved?.privateKey || '';
+      if (!publicKey || !privateKey) {
+        const generated = webPush.generateVAPIDKeys();
+        publicKey = generated.publicKey; privateKey = generated.privateKey;
+        await settingsCol.updateOne({ _id: 'vapid' }, { $set: { publicKey, privateKey, updatedAt: new Date() } }, { upsert: true });
+      }
+    }
+  }
+  webPush.setVapidDetails(VAPID_SUBJECT, publicKey, privateKey);
+  vapidKeys = { publicKey, privateKey };
+  return true;
+}
+function readLocalPushData() {
+  try { const x = JSON.parse(fs.readFileSync(LOCAL_PUSH_FILE, 'utf8')); return x && typeof x === 'object' ? x : { subscriptions: [], sent: {} }; }
+  catch { return { subscriptions: [], sent: {} }; }
+}
+function writeLocalPushData(data) { fs.mkdirSync(path.dirname(LOCAL_PUSH_FILE), { recursive: true }); fs.writeFileSync(LOCAL_PUSH_FILE, JSON.stringify(data, null, 2)); }
+async function savePushSubscription(userId, subscription) {
+  const endpoint = safeText(subscription?.endpoint || '', 4000); if (!endpoint) return false;
+  const rec = { endpoint, subscription, userId: String(userId), updatedAt: new Date() };
+  if (LOCAL_MODE) { const db = readLocalPushData(); const i = db.subscriptions.findIndex(x => x.endpoint === endpoint); const local = { ...rec, updatedAt: rec.updatedAt.toISOString() }; if (i >= 0) db.subscriptions[i] = local; else db.subscriptions.push(local); writeLocalPushData(db); return true; }
+  await pushSubsCol.updateOne({ endpoint }, { $set: rec, $setOnInsert: { createdAt: new Date() } }, { upsert: true }); return true;
+}
+async function removePushSubscription(endpoint) {
+  endpoint = safeText(endpoint || '', 4000); if (!endpoint) return;
+  if (LOCAL_MODE) { const db = readLocalPushData(); db.subscriptions = db.subscriptions.filter(x => x.endpoint !== endpoint); writeLocalPushData(db); return; }
+  await pushSubsCol.deleteOne({ endpoint });
+}
+async function pushSubscriptionsFor(userId) {
+  if (LOCAL_MODE) return readLocalPushData().subscriptions.filter(x => String(x.userId) === String(userId));
+  return pushSubsCol.find({ userId: String(userId) }).toArray();
+}
+async function sendPushToUser(userId, payload) {
+  if (!webPush || !vapidKeys) return 0;
+  const rows = await pushSubscriptionsFor(userId); let sent = 0;
+  for (const row of rows) {
+    try { await webPush.sendNotification(row.subscription, JSON.stringify(payload), { TTL: 60 * 60 * 12, urgency: 'high' }); sent++; }
+    catch (err) { if ([404, 410].includes(Number(err.statusCode))) await removePushSubscription(row.endpoint); else console.warn('Push send failed:', err.statusCode || '', err.message); }
+  }
+  return sent;
+}
+function serverDaysUntil(dateStr) { const d = Date.parse(`${String(dateStr || '')}T12:00:00Z`); const now = Date.parse(`${day(0)}T12:00:00Z`); return Number.isFinite(d) ? Math.round((d - now) / 86400000) : 9999; }
+function pushAlertCandidates(st) {
+  const out = [];
+  if (st?.household?.notifications === false) return out;
+  for (const x of st?.inventory || []) {
+    const d = serverDaysUntil(x.expiry); if (d > 2) continue;
+    const status = d < 0 ? 'expired' : d === 0 ? 'today' : d === 1 ? 'tomorrow' : '2days';
+    const keyDate = d < 0 ? day(0) : String(x.expiry || '');
+    out.push({ key: `inventory:${x.id}:${keyDate}:${status}`, title: d < 0 ? `FoodWise · ${x.name} expired` : d === 0 ? `FoodWise · ${x.name} expires today` : `FoodWise · ${x.name} expires ${d === 1 ? 'tomorrow' : 'in 2 days'}`, body: `${x.qty || 'Food item'} · ${x.place || 'Inventory'}. Open FoodWise and use it first.`, tag: `inventory-${x.id}`, url: '/?view=notifications' });
+  }
+  for (const x of st?.leftovers || []) {
+    if (x.status !== 'active') continue; const d = serverDaysUntil(x.useBy); if (d > 1) continue;
+    const status = d < 0 ? 'past' : d === 0 ? 'today' : 'tomorrow';
+    out.push({ key: `leftover:${x.id}:${d < 0 ? day(0) : x.useBy}:${status}`, title: d < 0 ? `FoodWise · ${x.name} use-by passed` : d === 0 ? `FoodWise · Eat ${x.name} today` : `FoodWise · ${x.name} due tomorrow`, body: `${x.qty || 'Leftover'} · use by ${x.useBy || 'soon'}.`, tag: `leftover-${x.id}`, url: '/?view=leftovers' });
+  }
+  const budget = Number(st?.household?.budget || 0), spent = Number(st?.household?.spent || 0);
+  if (budget > 0 && spent >= budget * .9) { const month = day(0).slice(0, 7), reached = spent >= budget; out.push({ key: `budget:${month}:${reached ? '100' : '90'}`, title: reached ? 'FoodWise · Monthly budget reached' : 'FoodWise · Budget almost used', body: `Recorded spend ₹${Math.round(spent)} of ₹${Math.round(budget)}.`, tag: 'budget', url: '/?view=budget' }); }
+  return out;
+}
+async function pushAlertAlreadySent(userId, key) {
+  if (LOCAL_MODE) return !!readLocalPushData().sent?.[`${userId}|${key}`];
+  return !!(await pushAlertsCol.findOne({ userId: String(userId), key }));
+}
+async function markPushAlertSent(userId, key) {
+  if (LOCAL_MODE) { const db = readLocalPushData(); db.sent = db.sent || {}; db.sent[`${userId}|${key}`] = new Date().toISOString(); writeLocalPushData(db); return; }
+  await pushAlertsCol.updateOne({ userId: String(userId), key }, { $setOnInsert: { createdAt: new Date() } }, { upsert: true });
+}
+async function sendDuePushAlertsForUser(userId, st) {
+  let count = 0;
+  for (const alert of pushAlertCandidates(st)) {
+    if (await pushAlertAlreadySent(userId, alert.key)) continue;
+    const sent = await sendPushToUser(userId, { title: alert.title, body: alert.body, tag: alert.tag, url: alert.url });
+    if (sent) { await markPushAlertSent(userId, alert.key); count += sent; }
+  }
+  return count;
+}
+async function runPushNotificationSweep() {
+  if (!webPush || !vapidKeys) return;
+  try {
+    if (LOCAL_MODE) { await sendDuePushAlertsForUser('local-user', readLocalState()); return; }
+    const cursor = statesCol.find({}, { projection: { data: 1 } });
+    for await (const doc of cursor) await sendDuePushAlertsForUser(String(doc._id), migrateState(doc.data || {}, { id: String(doc._id) }));
+  } catch (err) { console.warn('Push notification sweep failed:', err.message); }
+}
+
 function readLocalState() {
-  try { return migrateState(JSON.parse(fs.readFileSync(LOCAL_STATE_FILE, 'utf8')), localUser()); }
+  try {
+    const raw = JSON.parse(fs.readFileSync(LOCAL_STATE_FILE, 'utf8'));
+    const data = migrateState(raw, localUser());
+    if (JSON.stringify(raw) !== JSON.stringify(data)) {
+      fs.mkdirSync(path.dirname(LOCAL_STATE_FILE), { recursive: true });
+      fs.writeFileSync(LOCAL_STATE_FILE, JSON.stringify(data, null, 2));
+    }
+    return data;
+  }
   catch { const data = migrateState(seed(), localUser()); fs.writeFileSync(LOCAL_STATE_FILE, JSON.stringify(data, null, 2)); return data; }
 }
 async function getUserState(user) {
   if (LOCAL_MODE) return readLocalState();
-  const doc = await statesCol.findOne({ _id: String(user._id || user.id) });
-  if (doc?.data) return migrateState(doc.data, user);
+  const key = String(user._id || user.id);
+  const doc = await statesCol.findOne({ _id: key });
+  if (doc?.data) {
+    const data = migrateState(doc.data, user);
+    if (JSON.stringify(doc.data) !== JSON.stringify(data)) {
+      await statesCol.updateOne({ _id: key }, { $set: { data, updatedAt: new Date() } });
+    }
+    return data;
+  }
   const data = initialStateForUser(user);
-  await statesCol.updateOne({ _id: String(user._id || user.id) }, { $set: { data, createdAt: new Date(), updatedAt: new Date() } }, { upsert: true });
+  await statesCol.updateOne({ _id: key }, { $set: { data, createdAt: new Date(), updatedAt: new Date() } }, { upsert: true });
   return data;
 }
 async function saveUserState(user, state) {
@@ -783,9 +965,190 @@ function requestedLanguage(language, state) {
 }
 function localLangText(lang, en, hinglish, hi) { return lang === 'hi' ? hi : lang === 'hinglish' ? hinglish : en; }
 
+function liveInventoryItems(state) {
+  const now = new Date(); now.setHours(0,0,0,0);
+  return (state.inventory || []).filter(x => {
+    const d = new Date(`${x.expiry || '2999-12-31'}T00:00:00`); d.setHours(0,0,0,0);
+    return Number.isNaN(d.getTime()) || d >= now;
+  });
+}
+function inventoryDaysLeft(expiry='') {
+  if (!expiry) return null;
+  const a = new Date(); a.setHours(0,0,0,0);
+  const b = new Date(`${expiry}T00:00:00`); b.setHours(0,0,0,0);
+  if (Number.isNaN(b.getTime())) return null;
+  return Math.round((b-a)/86400000);
+}
+function inventoryItemSpeech(x, lang='en', detail=true) {
+  const d=inventoryDaysLeft(x.expiry), expiry=d==null?'':d===0?(lang==='hi'?'आज एक्सपायर':lang==='hinglish'?'aaj expire':'expires today'):d===1?(lang==='hi'?'कल एक्सपायर':lang==='hinglish'?'kal expire':'expires tomorrow'):(lang==='hi'?`${d} दिन में एक्सपायर`:lang==='hinglish'?`${d} din mein expire`:`expires in ${d} days`);
+  if (!detail) return x.name;
+  return lang==='hi'?`${x.name}, ${x.qty || 'मात्रा दर्ज नहीं'}, ${x.place || 'स्थान दर्ज नहीं'}${expiry?`, ${expiry}`:''}`:lang==='hinglish'?`${x.name}, ${x.qty || 'quantity not set'}, ${x.place || 'place not set'}${expiry?`, ${expiry}`:''}`:`${x.name}, ${x.qty || 'quantity not set'}, in ${x.place || 'unspecified storage'}${expiry?`, ${expiry}`:''}`;
+}
+function inventoryAssistantReply(question, state, language='') {
+  const q=String(question||'').toLowerCase();
+  const lang=requestedLanguage(language,state);
+  const items=liveInventoryItems(state);
+  const isAsk=/(what|which|where|how much|how many|do i have|have i got|mere paas|mere pass|kya hai|kitna|kitni|kitne|kahan|kidhar|bata|bta|dikhao|show|list|क्या है|कितना|कितनी|कितने|कहाँ|किधर|बताओ|दिखाओ)/i.test(q)||/(expire|expiry|jaldi|soon|first|pehle|खराब|एक्सपायरी|पहले)/i.test(q);
+  if(!isAsk) return null;
+  const fruitRe=/(apple|banana|mango|orange|grape|papaya|guava|pear|watermelon|melon|kiwi|strawberry|seb|kela|aam|santra|fruit)/i;
+  const vegRe=/(vegetable|vegetables|veggie|veggies|veg\b|sabzi|sabji|सब्ज|तरकारी)/i;
+  const fruitQ=/(fruit|fruits|फल)/i.test(q);
+  const categories=[
+    {re:/(dairy|milk products|डेयरी)/i, test:x=>String(x.category||'').toLowerCase()==='dairy'||/(milk|curd|yogurt|paneer|cheese|doodh|dahi)/i.test(x.name)},
+    {re:/(grain|grains|अनाज)/i, test:x=>String(x.category||'').toLowerCase()==='grains'||/(dal|daal|lentil|rice|chawal|oats|atta|flour|rajma|chana)/i.test(x.name)},
+    {re:/(protein|प्रोटीन)/i, test:x=>String(x.category||'').toLowerCase()==='protein'||/(egg|anda|chicken|fish|meat)/i.test(x.name)},
+    {re:/(bakery|बेकरी)/i, test:x=>String(x.category||'').toLowerCase()==='bakery'||/(bread|bun|bakery)/i.test(x.name)},
+    {re:/(frozen|फ्रोजन|फ्रीज़र)/i, test:x=>String(x.category||'').toLowerCase()==='frozen'||String(x.place||'').toLowerCase()==='freezer'}
+  ];
+  let filtered=null,label='';
+  if(vegRe.test(q)) { filtered=items.filter(x=>(String(x.category||'').toLowerCase()==='produce'||/(tomato|spinach|carrot|potato|onion|peas|matar|capsicum|cucumber|palak|tamatar|aloo|vegetable|sabzi)/i.test(x.name))&&!fruitRe.test(x.name)); label=lang==='hi'?'सब्ज़ियों में':lang==='hinglish'?'vegetables mein':'vegetables'; }
+  else if(fruitQ){filtered=items.filter(x=>fruitRe.test(x.name));label=lang==='hi'?'फलों में':lang==='hinglish'?'fruits mein':'fruits';}
+  else {
+    const c=categories.find(c=>c.re.test(q));
+    if(c){filtered=items.filter(c.test);label=lang==='hi'?'इस category में':lang==='hinglish'?'is category mein':'this category';}
+  }
+  const placeMatch=q.match(/\b(fridge|freezer|pantry|refrigerator)\b/i);
+  if(!filtered&&placeMatch){const wanted=placeMatch[1].toLowerCase()==='refrigerator'?'fridge':placeMatch[1].toLowerCase();filtered=items.filter(x=>String(x.place||'').toLowerCase()===wanted);label=lang==='hi'?`${wanted} में`:lang==='hinglish'?`${wanted} mein`:`in the ${wanted}`;}
+  if(filtered){
+    if(!filtered.length)return {answer:localLangText(lang,`You do not currently have any ${label} items in inventory.`,`Abhi aapke inventory mein ${label} koi item nahi hai.`,`अभी आपकी इन्वेंटरी में ${label} कोई आइटम नहीं है।`),youtubeQuery:''};
+    const details=filtered.map(x=>inventoryItemSpeech(x,lang,true)).join('; ');
+    return {answer:localLangText(lang,`You have ${filtered.length} ${label} item${filtered.length===1?'':'s'}: ${details}.`,`Aapke paas ${label} ${filtered.length} item hain: ${details}.`,`आपके पास ${label} ${filtered.length} आइटम हैं: ${details}।`),youtubeQuery:''};
+  }
+  if(/(expire|expiry|jaldi|soon|first|pehle|खराब|एक्सपायरी|पहले)/i.test(q)){
+    const soon=[...items].map(x=>({...x,_d:inventoryDaysLeft(x.expiry)})).filter(x=>x._d!=null).sort((a,b)=>a._d-b._d).slice(0,5);
+    if(!soon.length)return {answer:localLangText(lang,'No expiry dates are recorded for your current inventory.','Current inventory ke expiry dates available nahi hain.','मौजूदा इन्वेंटरी के एक्सपायरी डेट उपलब्ध नहीं हैं।'),youtubeQuery:''};
+    const details=soon.map(x=>inventoryItemSpeech(x,lang,true)).join('; ');
+    return {answer:localLangText(lang,`Use these first: ${details}.`,`Sabse pehle ye use karo: ${details}.`,`सबसे पहले इन्हें उपयोग करें: ${details}।`),youtubeQuery:''};
+  }
+  const stop=new Set(['mere','paas','pass','inventory','stock','mein','me','kya','hai','kitna','kitni','kitne','what','do','i','have','how','much','many','show','tell','bata','bta','please','the','is','are','quantity','of','ka','ki','ke','मुझे','मेरे','पास','इन्वेंटरी','क्या','है','कितना','कितनी','कितने','बताओ']);
+  const tokens=q.replace(/[^a-z0-9\u0900-\u097f ]/g,' ').split(/\s+/).filter(t=>t.length>1&&!stop.has(t));
+  const exact=items.find(x=>{const n=String(x.name||'').toLowerCase();return tokens.some(t=>n.includes(t)||t.includes(n));});
+  if(exact){return {answer:localLangText(lang,`Yes. ${inventoryItemSpeech(exact,lang,true)}.`,`Haan. ${inventoryItemSpeech(exact,lang,true)}.`,`हाँ। ${inventoryItemSpeech(exact,lang,true)}।`),youtubeQuery:''};}
+  if(/(inventory|stock|mere paas|mere pass|मेरे पास|इन्वेंटरी)/i.test(q)){
+    if(!items.length)return {answer:localLangText(lang,'Your current inventory is empty.','Aapka current inventory empty hai.','आपकी मौजूदा इन्वेंटरी खाली है।'),youtubeQuery:''};
+    const details=items.slice(0,25).map(x=>inventoryItemSpeech(x,lang,true)).join('; ');
+    const extra=items.length>25?localLangText(lang,` I also found ${items.length-25} more items.`,` Aur ${items.length-25} items bhi hain.`,` और ${items.length-25} आइटम भी हैं।`):'';
+    return {answer:localLangText(lang,`You currently have ${items.length} inventory items: ${details}.${extra}`,`Aapke inventory mein abhi ${items.length} items hain: ${details}.${extra}`,`आपकी इन्वेंटरी में अभी ${items.length} आइटम हैं: ${details}।${extra}`),youtubeQuery:''};
+  }
+  return null;
+}
+
+
+function appQuestionIntent(q='') {
+  return /(what|which|where|who|when|how|tell me|show me|list|status|summary|mere|mera|meri|mujhe|kya|kaun|kab|kahan|kidhar|kitna|kitni|kitne|bata|bta|dikha|dikhao|क्या|कौन|कब|कहाँ|कितना|कितनी|कितने|बताओ|दिखाओ)/i.test(String(q||''));
+}
+function appDateLabel(raw='') {
+  if (!raw) return '';
+  try { return new Date(`${raw}T12:00:00`).toLocaleDateString('en-IN',{day:'numeric',month:'short'}); } catch { return raw; }
+}
+function appItemsSpeech(rows=[], lang='en', max=8, formatter=null) {
+  const arr=(rows||[]).slice(0,max);
+  const txt=arr.map(x=>formatter?formatter(x):`${x.name}${x.qty?` ${x.qty}`:''}`).join('; ');
+  const extra=(rows||[]).length>max?localLangText(lang,` and ${(rows||[]).length-max} more`,` aur ${(rows||[]).length-max} aur`,` और ${(rows||[]).length-max} और`):'';
+  return txt+extra;
+}
+function wholeAppAssistantReply(question, state, language='') {
+  const lang=requestedLanguage(language,state), q=String(question||'').toLowerCase();
+  const inv=inventoryAssistantReply(question,state,lang); if(inv) return inv;
+  if(!appQuestionIntent(q)) return null;
+  const L=(en,hinglish,hi)=>localLangText(lang,en,hinglish,hi);
+  const money=n=>`₹${Math.round(Number(n||0))}`;
+  const consumed=[...(state.consumed||[])];
+  const archived=[...(state.reportArchive?.consumed||[])];
+  const leftovers=(state.leftovers||[]).filter(x=>x.status==='active');
+  const pending=(state.shopping||[]).filter(x=>!x.done), bought=(state.shopping||[]).filter(x=>x.done);
+  const waste=[...(state.waste||[])], avoidable=waste.filter(x=>x.avoidable);
+  const daily=[...(state.dailyEssentials||[])];
+  const orders=[...(state.orders||[])];
+  const cart=[...(state.cart||[])];
+  const challenges=[...(state.challenges||[])];
+  const recipes=[...(state.recipes||[])];
+  const todayKey=day(0), tomorrowKey=day(1);
+
+  if(/(consumed|consume|used food|khaya|khayi|khaye|kha chuka|use kiya|उपयोग|खाया|खायी)/i.test(q)){
+    const all=[...consumed.map(x=>({...x,_where:'recent'})),...archived.map(x=>({...x,_where:'report'}))].sort((a,b)=>String(b.consumedDate||b.consumedAt||'').localeCompare(String(a.consumedDate||a.consumedAt||'')));
+    if(!all.length)return{answer:L('No consumed-food history is recorded yet.','Abhi consumed food history empty hai.','अभी consumed food history खाली है।'),youtubeQuery:''};
+    const detail=appItemsSpeech(all,lang,10,x=>`${x.name}${x.qty?` ${x.qty}`:''}, ${appDateLabel(x.consumedDate||String(x.consumedAt||'').slice(0,10))}`);
+    return{answer:L(`You have ${consumed.length} consumed item(s) still inside the 7-day restore window and ${archived.length} older report-only record(s). ${detail}.`,`Aapke ${consumed.length} consumed item abhi 7-day restore window mein hain aur ${archived.length} purane record sirf report mein hain. ${detail}.`,`आपके ${consumed.length} consumed आइटम अभी 7-दिन restore window में हैं और ${archived.length} पुराने रिकॉर्ड केवल report में हैं। ${detail}।`),youtubeQuery:''};
+  }
+  if(/(leftover|leftovers|bacha hua|bacha khana|बचा हुआ|बचा खाना)/i.test(q)){
+    if(!leftovers.length)return{answer:L('There are no active leftovers right now.','Abhi koi active leftover nahi hai.','अभी कोई active leftover नहीं है।'),youtubeQuery:''};
+    const detail=appItemsSpeech(leftovers,lang,10,x=>`${x.name}, ${x.qty||''}${x.useBy?`, use by ${appDateLabel(x.useBy)}`:''}`);
+    return{answer:L(`You have ${leftovers.length} active leftover(s): ${detail}.`,`Aapke paas ${leftovers.length} active leftovers hain: ${detail}.`,`आपके पास ${leftovers.length} active leftovers हैं: ${detail}।`),youtubeQuery:''};
+  }
+  if(/(budget|spend|spent|paise|paisa|money|kharcha|bachा|remaining budget|बजट|खर्च|पैसे)/i.test(q)){
+    const budget=Number(state.household?.budget||0), spent=Number(state.household?.spent||0), left=Math.max(0,budget-spent);
+    return{answer:L(`Your monthly budget is ${money(budget)}. Recorded spend is ${money(spent)}, so ${money(left)} remains.`,`Aapka monthly budget ${money(budget)} hai. Recorded spend ${money(spent)} hai, isliye ${money(left)} remaining hai.`,`आपका monthly budget ${money(budget)} है। Recorded spend ${money(spent)} है, इसलिए ${money(left)} बाकी है।`),youtubeQuery:''};
+  }
+  if(/(waste|wasted|discard|feka|pheka|barbad|बर्बाद|फेंका|वेस्ट)/i.test(q)){
+    const cost=avoidable.reduce((a,x)=>a+Number(x.cost||0),0);
+    if(!waste.length)return{answer:L('No waste entries are recorded.','Abhi waste log empty hai.','अभी waste log खाली है।'),youtubeQuery:''};
+    const detail=appItemsSpeech(waste.slice().sort((a,b)=>String(b.date||'').localeCompare(String(a.date||''))),lang,7,x=>`${x.name}${x.qty?` ${x.qty}`:''}, ${x.reason||'no reason'}, ${money(x.cost)}`);
+    return{answer:L(`Waste tracker has ${waste.length} record(s); ${avoidable.length} are marked avoidable, costing ${money(cost)}. Recent: ${detail}.`,`Waste tracker mein ${waste.length} records hain; ${avoidable.length} avoidable hain, cost ${money(cost)}. Recent: ${detail}.`,`Waste tracker में ${waste.length} रिकॉर्ड हैं; ${avoidable.length} avoidable हैं, cost ${money(cost)}। Recent: ${detail}।`),youtubeQuery:''};
+  }
+  if(/(planner|meal plan|breakfast|lunch|dinner|aaj ka khana|kal ka khana|आज का खाना|कल का खाना)/i.test(q)){
+    const key=/(tomorrow|kal ka|कल का)/i.test(q)?tomorrowKey:todayKey;
+    const slots=['Breakfast','Lunch','Dinner'];
+    const rows=slots.map(slot=>({slot,name:state.meals?.[key]?.[slot],uses:state.mealIngredients?.[key]?.[slot]?.uses||[],servings:state.mealServings?.[key]?.[slot]||state.household?.currentServings||state.household?.members||1})).filter(x=>x.name);
+    if(!rows.length)return{answer:L(`There is no saved meal plan for ${key===todayKey?'today':'tomorrow'} yet.`,`Abhi ${key===todayKey?'aaj':'kal'} ka saved meal plan nahi hai.`,`अभी ${key===todayKey?'आज':'कल'} का saved meal plan नहीं है।`),youtubeQuery:''};
+    const detail=rows.map(x=>`${x.slot}: ${x.name}${x.uses.length?` (${x.uses.join(', ')})`:''}, ${x.servings} serving`).join('; ');
+    return{answer:L(`${key===todayKey?'Today':'Tomorrow'}'s meal plan: ${detail}.`,`${key===todayKey?'Aaj':'Kal'} ka meal plan: ${detail}.`,`${key===todayKey?'आज':'कल'} का meal plan: ${detail}।`),youtubeQuery:''};
+  }
+  if(/(daily essential|daily essentials|daily item|roz ka|daily milk|रोज़|डेली)/i.test(q)){
+    const active=daily.filter(x=>x.active!==false);
+    if(!daily.length)return{answer:L('No daily essentials are configured.','Koi daily essential configured nahi hai.','कोई daily essential configured नहीं है।'),youtubeQuery:''};
+    const detail=appItemsSpeech(daily,lang,10,x=>`${x.name} ${x.qty||''}, ${x.active===false?'paused':'active'}, ${x.shelfLife||2}-day expiry`);
+    return{answer:L(`You have ${daily.length} daily essential setting(s), ${active.length} active: ${detail}.`,`Aapke ${daily.length} daily essential settings hain, ${active.length} active: ${detail}.`,`आपके ${daily.length} daily essential settings हैं, ${active.length} active: ${detail}।`),youtubeQuery:''};
+  }
+  if(/(report|smart report|summary|overall|overview|रिपोर्ट|सारांश)/i.test(q)){
+    const wasteCost=avoidable.reduce((a,x)=>a+Number(x.cost||0),0), pendingCost=pending.reduce((a,x)=>a+Number(x.price||0),0);
+    return{answer:L(`FoodWise report summary: ${state.inventory?.length||0} inventory items, ${consumed.length} recent consumed items, ${archived.length} report-only consumed records, ${leftovers.length} active leftovers, ${pending.length} shopping items worth about ${money(pendingCost)}, ${waste.length} waste records with ${money(wasteCost)} avoidable cost, and ${money(state.stats?.savedMoney||0)} estimated money saved.`,`FoodWise report summary: ${state.inventory?.length||0} inventory items, ${consumed.length} recent consumed, ${archived.length} report-only consumed records, ${leftovers.length} leftovers, ${pending.length} shopping items approx ${money(pendingCost)}, ${waste.length} waste records jisme ${money(wasteCost)} avoidable cost hai, aur estimated ${money(state.stats?.savedMoney||0)} saved.`,`FoodWise report summary: ${state.inventory?.length||0} inventory items, ${consumed.length} recent consumed, ${archived.length} report-only consumed records, ${leftovers.length} leftovers, ${pending.length} shopping items लगभग ${money(pendingCost)}, ${waste.length} waste records जिनमें ${money(wasteCost)} avoidable cost है, और estimated ${money(state.stats?.savedMoney||0)} saved।`),youtubeQuery:''};
+  }
+  if(/(analytics|impact|saved money|money saved|food rescued|co2|carbon|water saved|points|streak|level|एनालिटिक्स|इम्पैक्ट|पॉइंट|स्ट्रीक)/i.test(q)){
+    const x=state.stats||{};
+    return{answer:L(`Your impact: ${money(x.savedMoney)} estimated money saved, ${Number(x.savedKg||0)} kg food rescued, ${Number(x.co2||0)} kg CO2 avoided, ${Number(x.water||0)} litres water impact, ${Number(x.points||0)} points, ${Number(x.streak||0)}-day streak, level ${Number(x.level||1)}.`,`Aapka impact: ${money(x.savedMoney)} estimated saved, ${Number(x.savedKg||0)} kg food rescued, ${Number(x.co2||0)} kg CO2 avoided, ${Number(x.water||0)} litre water impact, ${Number(x.points||0)} points, ${Number(x.streak||0)}-day streak, level ${Number(x.level||1)}.`,`आपका impact: ${money(x.savedMoney)} estimated saved, ${Number(x.savedKg||0)} kg food rescued, ${Number(x.co2||0)} kg CO2 avoided, ${Number(x.water||0)} litre water impact, ${Number(x.points||0)} points, ${Number(x.streak||0)}-day streak, level ${Number(x.level||1)}।`),youtubeQuery:''};
+  }
+  if(/(challenge|challenges|reward|चैलेंज|रिवार्ड)/i.test(q)){
+    if(!challenges.length)return{answer:L('No challenges are configured.','Koi challenge configured nahi hai.','कोई challenge configured नहीं है।'),youtubeQuery:''};
+    const detail=appItemsSpeech(challenges,lang,10,x=>`${x.title}: ${Number(x.progress||0)} of ${Number(x.target||0)}, reward ${Number(x.reward||0)} points`);
+    return{answer:L(`Your challenge progress: ${detail}.`,`Aapka challenge progress: ${detail}.`,`आपका challenge progress: ${detail}।`),youtubeQuery:''};
+  }
+  if(/(household|family|member|members|cooking for|kitne log|family me|परिवार|सदस्य|लोगों)/i.test(q)){
+    const names=(state.household?.memberProfiles||[]).filter(x=>x.active!==false).map(x=>x.name).filter(Boolean);
+    const cooking=Math.max(1,Number(state.household?.currentServings||state.household?.members||1));
+    return{answer:L(`Your household has ${Number(state.household?.members||names.length||1)} member(s). Cooking is set for ${cooking}. ${names.length?`Members: ${names.join(', ')}.`:''}`,`Household mein ${Number(state.household?.members||names.length||1)} members hain. Cooking ${cooking} logon ke liye set hai. ${names.length?`Members: ${names.join(', ')}.`:''}`,`Household में ${Number(state.household?.members||names.length||1)} members हैं। Cooking ${cooking} लोगों के लिए set है। ${names.length?`Members: ${names.join(', ')}।`:''}`),youtubeQuery:''};
+  }
+  if(/(notification|notifications|alert|alerts|attention|urgent|नोटिफिकेशन|अलर्ट)/i.test(q)){
+    const urgent=(state.inventory||[]).map(x=>({...x,_d:inventoryDaysLeft(x.expiry)})).filter(x=>x._d!=null&&x._d<=2).sort((a,b)=>a._d-b._d);
+    if(!urgent.length)return{answer:L('There are no urgent expiry alerts right now.','Abhi koi urgent expiry alert nahi hai.','अभी कोई urgent expiry alert नहीं है।'),youtubeQuery:''};
+    const detail=appItemsSpeech(urgent,lang,8,x=>inventoryItemSpeech(x,lang,true));
+    return{answer:L(`You have ${urgent.length} urgent expiry alert(s): ${detail}.`,`Aapke ${urgent.length} urgent expiry alerts hain: ${detail}.`,`आपके ${urgent.length} urgent expiry alerts हैं: ${detail}।`),youtubeQuery:''};
+  }
+  if(/(saved recipe|saved recipes|recipe list|recipes available|available recipes|meri recipe|रेसिपी लिस्ट|सेव्ड रेसिपी)/i.test(q)){
+    const savedIds=new Set((state.savedRecipes||[]).map(String)), saved=recipes.filter(x=>savedIds.has(String(x.id)));
+    const src=/saved|meri|सेव्ड/i.test(q)?saved:recipes;
+    if(!src.length)return{answer:L('No matching recipes are saved.','Koi matching recipe saved nahi hai.','कोई matching recipe saved नहीं है।'),youtubeQuery:''};
+    const detail=appItemsSpeech(src,lang,12,x=>`${x.name}${x.time?`, ${x.time} min`:''}`);
+    return{answer:L(`${/saved|meri|सेव्ड/i.test(q)?'Saved':'Available'} recipes: ${detail}.`,`${/saved|meri|सेव्ड/i.test(q)?'Saved':'Available'} recipes: ${detail}.`,`${/saved|meri|सेव्ड/i.test(q)?'Saved':'Available'} recipes: ${detail}।`),youtubeQuery:''};
+  }
+  if(/(nutrition|calorie|calories|protein|carbs|fat|fiber|पोषण|कैलोरी)/i.test(q)){
+    const withNutrition=(state.inventory||[]).filter(x=>x.nutrition&&typeof x.nutrition==='object');
+    if(!withNutrition.length)return{answer:L('No item-level nutrition data is saved in your current inventory yet.','Current inventory mein item-level nutrition data saved nahi hai.','मौजूदा inventory में item-level nutrition data saved नहीं है।'),youtubeQuery:''};
+    const detail=appItemsSpeech(withNutrition,lang,8,x=>`${x.name}: ${x.nutrition.calories??'?'} calories, protein ${x.nutrition.protein??'?'} g`);
+    return{answer:L(`Saved nutrition data: ${detail}.`,`Saved nutrition data: ${detail}.`,`Saved nutrition data: ${detail}।`),youtubeQuery:''};
+  }
+  if(/(theme|dark mode|light mode|language|settings|setting|भाषा|सेटिंग)/i.test(q)){
+    return{answer:L(`Current app settings: theme ${state.household?.theme||'dark'}, language ${state.household?.language||'en'}, notifications ${state.household?.notifications===false?'off':'on'}.`,`Current settings: theme ${state.household?.theme||'dark'}, language ${state.household?.language||'en'}, notifications ${state.household?.notifications===false?'off':'on'}.`,`Current settings: theme ${state.household?.theme||'dark'}, language ${state.household?.language||'en'}, notifications ${state.household?.notifications===false?'off':'on'}।`),youtubeQuery:''};
+  }
+  return null;
+}
+
 function aiReply(question, state, language = '') {
   const q = (question || '').toLowerCase();
   const lang = requestedLanguage(language, state);
+  if (/(shopping|shopping list|shop|grocery|cart|order|checkout|kharidari|kharidna|खरीदारी|कार्ट|ऑर्डर)/i.test(q)) return { answer: localLangText(lang, 'Shopping Q&A is disabled. Open the Shopping screen to view or manage shopping data.', 'Shopping Q&A hata diya hai. Shopping screen kholkar list ya cart manage karo.', 'Shopping Q&A बंद है। Shopping screen खोलकर list या cart manage करें।'), youtubeQuery: '' };
+  const appAnswer = wholeAppAssistantReply(question, state, lang);
+  if (appAnswer) return appAnswer;
   const expiringItems = [...state.inventory].sort((a, b) => a.expiry.localeCompare(b.expiry)).slice(0, 3);
   const expiring = expiringItems.map(x => x.name);
   const inv = state.inventory.map(x => x.name.toLowerCase());
@@ -801,8 +1164,7 @@ function aiReply(question, state, language = '') {
   }
   if ((q.includes('paneer') || q.includes('tomato') || q.includes('bread')) && inv.includes('paneer') && inv.some(x=>x.includes('tomato')) && inv.includes('bread')) return { answer: localLangText(lang,'Make Paneer Tomato Toast: toast the bread, sauté tomato, add crumbled paneer and spices, cook for 5–6 minutes and serve on toast.','Paneer Tomato Toast banao: bread toast karo, tomato sauté karo, crumbled paneer + masala add karo, 5–6 min cook karke toast par serve karo.','पनीर टोमेटो टोस्ट बनाएँ: ब्रेड टोस्ट करें, टमाटर भूनें, क्रम्बल पनीर और मसाला डालें, 5–6 मिनट पकाएँ और टोस्ट पर परोसें।'), youtubeQuery: `Paneer Tomato Toast recipe ${lang==='en'?'English':'Hindi'}` };
   if (q.includes('leftover') || q.includes('bacha')) return { answer: localLangText(lang,'Keep leftovers in the Eat First list and follow the use-by date.','Leftovers ko Eat First list me rakho aur use-by date follow karo.','बचे खाने को Eat First सूची में रखें और use-by तारीख का पालन करें।'), youtubeQuery: '' };
-  if (q.includes('shopping') || q.includes('buy') || q.includes('kharid')) return { answer: localLangText(lang,`You currently have ${state.inventory.length} inventory items. Check the fridge and pantry before making a shopping list.`,`Current inventory me ${state.inventory.length} items hain. List banane se pehle fridge/pantry check karo.`,`अभी इन्वेंटरी में ${state.inventory.length} आइटम हैं। खरीदारी सूची बनाने से पहले फ्रिज और पेंट्री जाँचें।`), youtubeQuery: '' };
-  return { answer: localLangText(lang,'Gemini is not connected, so offline mode can answer FoodWise inventory, expiry, recipe, shopping, storage and waste questions only. Connect GEMINI_API_KEY to ask anything.','Gemini connected nahi hai, isliye offline mode abhi FoodWise inventory, expiry, recipe, shopping, storage aur waste questions ka answer de sakta hai. Kuch bhi poochne ke liye GEMINI_API_KEY connect karo.','Gemini जुड़ा नहीं है, इसलिए ऑफलाइन मोड अभी FoodWise इन्वेंटरी, एक्सपायरी, रेसिपी, खरीदारी, स्टोरेज और वेस्ट सवालों का जवाब दे सकता है। कुछ भी पूछने के लिए GEMINI_API_KEY जोड़ें।'), youtubeQuery: '' };
+  return { answer: localLangText(lang,'Gemini is not connected, but offline mode can answer questions from your FoodWise app data across inventory, consumed history, planner, budget, waste, report, analytics, daily essentials, challenges, household and settings. Connect GEMINI_API_KEY for general questions outside FoodWise.','Gemini connected nahi hai, lekin offline mode aapke FoodWise app data se inventory, consumed history, planner, budget, waste, report, analytics, daily essentials, challenges, household aur settings ke sawal answer kar sakta hai. FoodWise ke bahar general questions ke liye GEMINI_API_KEY connect karo.','Gemini जुड़ा नहीं है, लेकिन offline mode आपके FoodWise app data से inventory, consumed history, planner, budget, waste, report, analytics, daily essentials, challenges, household और settings के सवालों का जवाब दे सकता है। FoodWise के बाहर general questions के लिए GEMINI_API_KEY जोड़ें।'), youtubeQuery: '' };
 }
 
 function extractYoutubeMarker(text, fallback = '') {
@@ -815,20 +1177,32 @@ function extractYoutubeMarker(text, fallback = '') {
 
 async function aiReplyGemini(question, state, language = '') {
   const lang = requestedLanguage(language, state);
+  if (/(shopping|shopping list|shop|grocery|cart|order|checkout|kharidari|kharidna|खरीदारी|कार्ट|ऑर्डर)/i.test(String(question||''))) return { answer: localLangText(lang, 'Shopping Q&A is disabled. Open the Shopping screen to view or manage shopping data.', 'Shopping Q&A hata diya hai. Shopping screen kholkar list ya cart manage karo.', 'Shopping Q&A बंद है। Shopping screen खोलकर list या cart manage करें।'), youtubeQuery: '' };
+  const appAnswer = wholeAppAssistantReply(question, state, lang);
+  if (appAnswer) return appAnswer;
   if (!GEMINI_API_KEY) return aiReply(question, state, lang);
   const compact = {
     household: { members: state.household.members, cookingFor: state.household.currentServings || state.household.members, memberNames: (state.household.memberProfiles || []).map(x => x.name), budget: state.household.budget, spent: state.household.spent, preference: state.household.veg, allergies: state.household.allergies },
     inventory: state.inventory.map(x => ({ name: x.name, qty: x.qty, place: x.place, expiry: x.expiry })),
     consumed: (state.consumed || []).slice(0, 30).map(x => ({ name: x.name, qty: x.qty, consumedDate: x.consumedDate || String(x.consumedAt || '').slice(0,10) })),
+    consumedReportArchive: (state.reportArchive?.consumed || []).slice(0, 60).map(x => ({ name: x.name, qty: x.qty, consumedDate: x.consumedDate, expiry: x.expiry, cost: x.cost })),
     leftovers: state.leftovers.filter(x => x.status === 'active').map(x => ({ name: x.name, qty: x.qty, useBy: x.useBy })),
-    shopping: state.shopping.filter(x => !x.done).map(x => ({ name: x.name, qty: x.qty }))
+    waste: (state.waste || []).slice(-60).map(x => ({ date: x.date, name: x.name, qty: x.qty, reason: x.reason, cost: x.cost, avoidable: !!x.avoidable })),
+    meals: state.meals || {},
+    mealIngredients: state.mealIngredients || {},
+    mealServings: state.mealServings || {},
+    stats: state.stats || {},
+    dailyEssentials: (state.dailyEssentials || []).map(x => ({ name: x.name, qty: x.qty, shelfLife: x.shelfLife, place: x.place, active: x.active !== false })),
+    challenges: (state.challenges || []).map(x => ({ title: x.title, progress: x.progress, target: x.target, reward: x.reward })),
+    savedRecipes: state.savedRecipes || [],
+    recipes: (state.recipes || []).map(x => ({ id: x.id, name: x.name, uses: x.uses, missing: x.missing, time: x.time, calories: x.calories })),
   };
   const needsRecipe = recipeIntent(question);
   const langLabel = lang === 'hi' ? 'natural Hindi in Devanagari' : lang === 'hinglish' ? 'natural Hinglish written in Latin script' : 'clear English';
   const youtubeLang = lang === 'en' ? 'English' : 'Hindi';
   const prompt = `You are FoodWise AI, a helpful general-purpose assistant inside the FoodWise app. You may answer ANY normal user question: general knowledge, study, writing, coding, calculations, explanations, planning, technology, food, recipes, and everyday questions. The app language is ${lang}; answer in ${langLabel} unless the user explicitly requests another language.
 
-FoodWise context rule: only use the household data below when the question is actually about the user's food, inventory, consumed history, shopping, expiry, storage, leftovers, nutrition, waste, budget, meal planning, or recipes. Never pretend an item is in the user's kitchen unless it appears in the provided inventory/leftovers. For food questions, prioritize items closest to expiry.
+FoodWise context rule: when the user asks about ANY FoodWise screen or their app data — inventory, consumed/report archive, expiry, notifications, storage, leftovers, nutrition, waste, budget, analytics/impact, household, challenges, daily essentials, meal planning, recipes, or settings — answer from the household data below. For these app-data questions, treat the supplied data as the source of truth. Never pretend an item is in the user's kitchen unless it appears in the provided inventory/leftovers. For food questions, prioritize items closest to expiry.
 
 Recipe rule: if the user asks what to cook, names a dish, asks for a recipe, or asks for a YouTube cooking video, give a useful recipe scaled for household.cookingFor people. Clearly separate ingredients already in inventory from optional/missing ingredients. Give 4-7 short numbered steps and avoid unsafe food-safety claims. ${needsRecipe ? `At the very end add exactly one separate line: YOUTUBE_QUERY: <dish name> recipe ${youtubeLang}. Do not invent a direct video URL.` : 'Do not add a YOUTUBE_QUERY line unless a cooking/recipe/video request is being answered.'}
 
@@ -938,14 +1312,18 @@ function makeReportXlsx(st, report, aiSummary) {
   const waste = [[T('Garbage / Waste Analysis'), '', '', '', '', ''], [H('Date'), H('Item'), H('Quantity'), H('Reason'), H('Cost ₹'), H('Avoidable')], ...(st.waste || []).map(x => [x.date, x.name, x.qty, x.reason, Number(x.cost || 0), x.avoidable ? 'Yes' : 'No']), ['', '', '', '', '', ''], [S('Summary'), '', '', '', '', ''], ['Worst item', report.waste.worstItem.name, '', '', report.waste.worstItem.cost, ''], ['Top avoidable reason', report.waste.topReason.name, '', '', report.waste.topReason.cost, ''], ['Total waste cost', '', '', '', report.waste.totalCost, ''], ['Avoidable waste cost', '', '', '', report.waste.avoidableCost, '']];
   const fore = [[T('Future Savings Forecast'), '', '', '', ''], [H('Horizon'), H('Current Baseline Waste ₹'), H(`Goal Savings @ ${Math.round(report.savings.goalPct * 100)}% ₹`), H('50% Reduction Scenario ₹'), H('Projected Waste After Goal ₹')], ...report.savings.forecast.map(x => [`${x.months} month${x.months > 1 ? 's' : ''}`, report.savings.monthlyAvoidableBaseline * x.months, x.goalSavings, x.best50Savings, x.projectedWasteAfterGoal]), ['', '', '', '', ''], ['Note', 'Estimates are based on current logged waste and may change as more data is recorded.', '', '', '']];
   const inv = [[T('Current Inventory'), '', '', '', '', '', '', ''], [H('Item'), H('Quantity'), H('Location'), H('Category'), H('Purchase'), H('Expiry'), H('Days Left'), H('Cost ₹')], ...(st.inventory || []).sort((a, b) => String(a.expiry).localeCompare(String(b.expiry))).map(x => [x.name, x.qty, x.place, x.category, x.purchase, x.expiry, reportDateDays(x.expiry), Number(x.cost || 0)])];
-  const consumed = [[T('Consumed History'), '', '', '', '', '', ''], [H('Item'), H('Quantity'), H('Location'), H('Category'), H('Consumed Date'), H('Original Expiry'), H('Cost ₹')], ...(st.consumed || []).sort((a,b)=>String(b.consumedAt||b.consumedDate||'').localeCompare(String(a.consumedAt||a.consumedDate||''))).map(x => [x.name, x.qty, x.place || '', x.category || '', x.consumedDate || String(x.consumedAt||'').slice(0,10), x.expiry || '', Number(x.cost || 0)])];
+  const consumedReportRows = [
+    ...(st.consumed || []).map(x => ({ ...reportConsumedRow(x), status: `Recent (≤${CONSUMED_RETENTION_DAYS} days)` })),
+    ...((st.reportArchive?.consumed || []).map(x => ({ ...reportConsumedRow(x), status: 'Archived report only' })))
+  ].sort((a,b)=>String(b.consumedDate||'').localeCompare(String(a.consumedDate||'')));
+  const consumed = [[T('Consumed History'), '', '', '', '', ''], [H('Item'), H('Quantity'), H('Consumed Date'), H('Original Expiry'), H('Cost ₹'), H('Storage status')], ...consumedReportRows.map(x => [x.name, x.qty, x.consumedDate || '', x.expiry || '', Number(x.cost || 0), x.status])];
   const ai = [[T('AI / Smart Action Brief'), '', '', ''], [H('Priority'), H('Recommendation'), H('Data basis'), H('Status')], ...String(aiSummary || '').split(/\r?\n/).filter(Boolean).map((x, i) => [i + 1, x, i < 2 ? 'Inventory + shopping + expiry' : i === 3 ? 'Waste logs' : 'Waste logs + goal', 'Live at export time'])];
   const analyticsDays = Array.from({ length: 14 }, (_, i) => { const d = day(i - 13); const logs = (st.waste || []).filter(x => x.date === d); return [d, logs.reduce((a, x) => a + Number(x.cost || 0), 0), logs.filter(x => x.avoidable).reduce((a, x) => a + Number(x.cost || 0), 0), logs.length]; });
   const expiryBuckets = [['Expired / today', report.expiry.filter(x => x.daysLeft <= 0).length], ['1–2 days', report.expiry.filter(x => x.daysLeft >= 1 && x.daysLeft <= 2).length], ['3–4 days', report.expiry.filter(x => x.daysLeft >= 3 && x.daysLeft <= 4).length], ['5–7 days', report.expiry.filter(x => x.daysLeft >= 5 && x.daysLeft <= 7).length]];
   const analytics = [[T('Analytics Data · Chart Ready'), '', '', ''], [H('Date'), H('Waste Cost ₹'), H('Avoidable Cost ₹'), H('Waste Logs')], ...analyticsDays, ['', '', '', ''], [S('Expiry Risk Buckets'), '', '', ''], [H('Bucket'), H('Items'), '', ''], ...expiryBuckets.map(x => [x[0], x[1], '', '']), ['', '', '', ''], [S('Forecast Series'), '', '', ''], [H('Months'), H('Goal Savings ₹'), H('50% Scenario ₹'), H('Projected Waste ₹')], ...report.savings.forecast.map(x => [x.months, x.goalSavings, x.best50Savings, x.projectedWasteAfterGoal])];
   const planner = [[T('Inventory-only Meal Planner'), '', '', '', ''], [H('Date'), H('Meal'), H('Plan'), H('Inventory Ingredients'), H('Servings')], ...Object.keys(st.meals || {}).sort().flatMap(d => ['Breakfast','Lunch','Dinner'].map(slot => [d, slot, st.meals?.[d]?.[slot] || '', (st.mealIngredients?.[d]?.[slot]?.uses || []).join(', '), Number(st.mealServings?.[d]?.[slot] || st.household?.currentServings || st.household?.members || 1)]))];
   const sheets = [
-    ['Dashboard', dash, [30, 38, 34, 44]], ['AI Insights', ai, [12, 74, 32, 20]], ['Analytics Data', analytics, [18, 18, 20, 16]], ['Buy Recommendations', buy, [24, 16, 16, 14, 16, 58]], ['Expiry Priority', exp, [24, 16, 16, 15, 12, 12, 18, 34]], ['Waste Analysis', waste, [14, 24, 18, 30, 12, 12]], ['Savings Forecast', fore, [18, 24, 24, 24, 28]], ['Inventory Planner', planner, [16, 14, 38, 48, 12]], ['Inventory', inv, [24, 16, 16, 16, 14, 14, 12, 12]], ['Consumed History', consumed, [24, 16, 16, 16, 18, 16, 12]]
+    ['Dashboard', dash, [30, 38, 34, 44]], ['AI Insights', ai, [12, 74, 32, 20]], ['Analytics Data', analytics, [18, 18, 20, 16]], ['Buy Recommendations', buy, [24, 16, 16, 14, 16, 58]], ['Expiry Priority', exp, [24, 16, 16, 15, 12, 12, 18, 34]], ['Waste Analysis', waste, [14, 24, 18, 30, 12, 12]], ['Savings Forecast', fore, [18, 24, 24, 24, 28]], ['Inventory Planner', planner, [16, 14, 38, 48, 12]], ['Inventory', inv, [24, 16, 16, 16, 14, 14, 12, 12]], ['Consumed History', consumed, [26, 18, 18, 18, 14, 24]]
   ];
   const styleXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="4"><font><sz val="11"/><name val="Calibri"/></font><font><b/><color rgb="FFFFFFFF"/><sz val="11"/><name val="Calibri"/></font><font><b/><color rgb="FFFFFFFF"/><sz val="16"/><name val="Calibri"/></font><font><b/><color rgb="FF103A2C"/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="7"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF0F9F6E"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FF0B1F1A"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE7F7F0"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFF1D6"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFDE6E3"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="2"><border/><border><left style="thin"><color rgb="FFDDE7E1"/></left><right style="thin"><color rgb="FFDDE7E1"/></right><top style="thin"><color rgb="FFDDE7E1"/></top><bottom style="thin"><color rgb="FFDDE7E1"/></bottom></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="6"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFill="1" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf><xf numFmtId="0" fontId="2" fillId="3" borderId="0" xfId="0" applyFill="1" applyFont="1"/><xf numFmtId="0" fontId="3" fillId="4" borderId="1" xfId="0" applyFill="1" applyFont="1" applyBorder="1"/><xf numFmtId="0" fontId="3" fillId="5" borderId="1" xfId="0" applyFill="1" applyFont="1" applyBorder="1"/><xf numFmtId="0" fontId="3" fillId="6" borderId="1" xfId="0" applyFill="1" applyFont="1" applyBorder="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
   const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${sheets.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('')}</Types>`;
@@ -968,7 +1346,7 @@ const server = http.createServer(async (req, res) => {
       let mongo = LOCAL_MODE ? 'local-json' : 'disconnected';
       if (!LOCAL_MODE) { try { await mongoDb.command({ ping: 1 }); mongo = 'connected'; } catch {} }
       const ok = LOCAL_MODE || mongo === 'connected';
-      return send(res, ok ? 200 : 503, { ok, app: 'FoodWise Pro v22 · Voice Inventory + Smart Planner Images', mode: LOCAL_MODE ? 'local' : 'cloud', storage: LOCAL_MODE ? 'JSON file' : 'MongoDB', mongo, firebaseConfigured: firebaseConfigured(), time: new Date().toISOString() });
+      return send(res, ok ? 200 : 503, { ok, app: 'FoodWise Pro v29 · Mobile Notifications + Clean Header + Shopping Q&A Removed', mode: LOCAL_MODE ? 'local' : 'cloud', storage: LOCAL_MODE ? 'JSON file' : 'MongoDB', mongo, firebaseConfigured: firebaseConfigured(), pushConfigured: Boolean(webPush && vapidKeys), time: new Date().toISOString() });
     }
     if (url.pathname === '/api/config') return send(res, 200, { localMode: LOCAL_MODE, geminiConfigured: Boolean(GEMINI_API_KEY), cloudflareConfigured: cloudflareConfigured(), firebaseConfigured: firebaseConfigured(), database: LOCAL_MODE ? 'Local JSON' : 'MongoDB', imageProvider: cloudflareConfigured() ? 'Cloudflare Workers AI' : 'Local food assets', imageModel: activeImageModel, textModel: GEMINI_API_KEY ? activeTextModel : 'FoodWise local AI', apiVersion: GEMINI_API_VERSION });
     if (url.pathname.startsWith('/api/images/') && req.method === 'GET') {
@@ -1090,8 +1468,13 @@ const server = http.createServer(async (req, res) => {
       catch (err) { return send(res, err.status || 400, { error: err.message }); }
       return send(res, 200, { ok: true, message: 'Firebase password updated successfully' });
     }
+    if (url.pathname === '/api/push/config' && req.method === 'GET') return send(res, 200, { supported: Boolean(webPush && vapidKeys), publicKey: vapidKeys?.publicKey || '' });
+    if (url.pathname === '/api/push/subscribe' && req.method === 'POST') { const b = await parseBody(req); if (!b.subscription?.endpoint) return send(res, 400, { error: 'Push subscription is required' }); await savePushSubscription(String(user._id || user.id), b.subscription); return send(res, 200, { ok: true }); }
+    if (url.pathname === '/api/push/unsubscribe' && req.method === 'POST') { const b = await parseBody(req); await removePushSubscription(b.endpoint || b.subscription?.endpoint || ''); return send(res, 200, { ok: true }); }
+    if (url.pathname === '/api/push/test' && req.method === 'POST') { const sent = await sendPushToUser(String(user._id || user.id), { title: 'FoodWise test notification', body: 'Mobile notifications are connected and working.', tag: 'foodwise-test', url: '/?view=notifications' }); return send(res, 200, { ok: true, sent }); }
+    if (url.pathname === '/api/push/check' && req.method === 'POST') { const st = await getUserState(user); const sent = await sendDuePushAlertsForUser(String(user._id || user.id), st); return send(res, 200, { ok: true, sent }); }
     if (url.pathname === '/api/state' && req.method === 'GET') return send(res, 200, await getUserState(user));
-    if (url.pathname === '/api/state' && req.method === 'PUT') { const body = await parseBody(req); await saveUserState(user, body); return send(res, 200, { ok: true }); }
+    if (url.pathname === '/api/state' && req.method === 'PUT') { const body = await parseBody(req); const saved = await saveUserState(user, body); sendDuePushAlertsForUser(String(user._id || user.id), saved).catch(()=>{}); return send(res, 200, { ok: true }); }
     if (url.pathname === '/api/reset' && req.method === 'POST') { const fresh = LOCAL_MODE ? migrateState(seed(), localUser()) : initialStateForUser(user, { name: user.name, members: 1, householdName: `${user.name || 'My'}'s Household` }); await saveUserState(user, fresh); return send(res, 200, fresh); }
     if (url.pathname === '/api/ai' && req.method === 'POST') {
       const b = await parseBody(req); const st = await getUserState(user);
@@ -1171,14 +1554,19 @@ server.on('error', err => {
 async function startServer() {
   try {
     await connectMongo();
+    await initWebPush();
+    setTimeout(()=>runPushNotificationSweep().catch(()=>{}), 4000);
+    const pushTimer=setInterval(()=>runPushNotificationSweep().catch(()=>{}), 5*60*1000);
+    pushTimer.unref?.();
     server.listen(PORT, () => {
-      console.log('\n  FoodWise Pro v22 · Voice Inventory + Smart Planner Images ✅');
+      console.log('\n  FoodWise Pro v29 · Mobile Notifications + Clean Header + Shopping Q&A Removed ✅');
       console.log(`  URL:     http://localhost:${PORT}`);
       console.log(`  Health:  http://localhost:${PORT}/api/health`);
       console.log(`  Mode:    ${LOCAL_MODE ? 'LOCAL · JSON storage · login gate enabled' : `CLOUD · MongoDB ${MONGODB_DB_NAME}`}`);
       console.log(`  Firebase Auth: ${LOCAL_MODE ? 'local login active · Firebase skipped' : (firebaseConfigured() ? 'configured ✅' : 'not configured')}`);
       console.log(`  Gemini Chat: ${GEMINI_API_KEY ? 'configured ✅' : 'local fallback active'}`);
       console.log(`  Cloudflare Images: ${cloudflareConfigured() ? 'configured ✅' : 'optional / local assets active'}`);
+      console.log(`  Mobile Push: ${webPush && vapidKeys ? 'configured ✅' : 'fallback/in-app only'}`);
     });
   } catch (err) {
     console.error('\nFoodWise startup failed:', err.message);

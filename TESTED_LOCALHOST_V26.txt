@@ -1,0 +1,9 @@
+FoodWise Pro v26 validation
+- server.js syntax: PASS
+- public/app.js syntax: PASS
+- localhost health endpoint: PASS
+- Excel report download: PASS
+- Consumed History Excel sheet includes archived report-only records: PASS
+- 6-day consumed record remains restorable: PASS
+- 8-day consumed record is removed from detailed consumed state and moved to reportArchive.consumed: PASS
+- Archived row excludes image/sourceInventoryId/originalQty/restore-award metadata: PASS

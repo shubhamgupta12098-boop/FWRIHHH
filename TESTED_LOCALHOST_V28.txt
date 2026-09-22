@@ -1,0 +1,11 @@
+FoodWise Pro v28 — Whole App Q&A validation
+
+PASS: Node syntax check for server.js and public/app.js.
+PASS: Local server starts and /api/health reports v28.
+PASS: Authenticated offline Q&A answers budget from real state (₹9000 budget, ₹5240 spent, ₹3760 remaining in sample data).
+PASS: Waste Q&A reads waste count, avoidable count, cost and recent rows from state.
+PASS: Consumed Q&A reads both 7-day consumed data and report-only archive data.
+PASS: Household Q&A reads member count, cooking-for value and member names.
+PASS: Voice routing recognizes whole-app questions before navigation routes, while direct commands such as “planner kholo” remain navigation commands.
+PASS: Gemini compact context includes whole-app FoodWise data for complex Q&A when configured.
+PASS: Service worker cache bumped to foodwise-v28-whole-app-qa for mobile refresh.

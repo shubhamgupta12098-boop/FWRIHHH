@@ -1,0 +1,13 @@
+FoodWise Pro v29 validation
+
+- node --check public/app.js: PASS
+- node --check server.js: PASS
+- Local server /api/health: PASS
+- Local login: PASS
+- Shopping Q&A returns disabled / client voice routes to Shopping: PASS
+- Inventory Q&A remains active: PASS
+- Push endpoints respond safely when web-push is unavailable locally: PASS
+- Service worker v29 includes push + notification click handlers: PASS
+- Notification badge is a dot, not a numeric count: PASS
+
+Cloud Web Push requires npm install on Render so the declared web-push dependency is present. Render buildCommand already runs npm install.

@@ -1,5 +1,7 @@
-const CACHE='foodwise-v22-voice-planner-images';
+const CACHE='foodwise-v29-mobile-notifications';
 const ASSETS=['/','/style.css','/app.js','/manifest.json','/assets/hero-dish.jpg','/assets/tomatoes.jpg','/assets/paneer.jpg','/assets/milk.jpg','/assets/spinach.jpg','/assets/bread.jpg'];
 self.addEventListener('install',e=>{self.skipWaiting();e.waitUntil(caches.open(CACHE).then(c=>c.addAll(ASSETS)))});
 self.addEventListener('activate',e=>e.waitUntil(Promise.all([clients.claim(),caches.keys().then(keys=>Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k))))])));
-self.addEventListener('fetch',e=>{if(e.request.method!=='GET'||e.request.url.includes('/api/'))return;e.respondWith(fetch(e.request).then(r=>{const copy=r.clone();caches.open(CACHE).then(c=>c.put(e.request,copy));return r}).catch(()=>caches.match(e.request)))})
+self.addEventListener('fetch',e=>{if(e.request.method!=='GET'||e.request.url.includes('/api/'))return;e.respondWith(fetch(e.request).then(r=>{const copy=r.clone();caches.open(CACHE).then(c=>c.put(e.request,copy));return r}).catch(()=>caches.match(e.request)))});
+self.addEventListener('push',e=>{let data={};try{data=e.data?.json?.()||{}}catch{data={body:e.data?.text?.()||''}}const title=data.title||'FoodWise';const options={body:data.body||'You have a FoodWise reminder.',icon:'/icon-192.png',badge:'/icon-192.png',tag:data.tag||'foodwise-reminder',renotify:false,vibrate:[180,80,180],data:{url:data.url||'/?view=notifications'}};e.waitUntil(self.registration.showNotification(title,options))});
+self.addEventListener('notificationclick',e=>{e.notification.close();const target=new URL(e.notification.data?.url||'/?view=notifications',self.location.origin).href;e.waitUntil(clients.matchAll({type:'window',includeUncontrolled:true}).then(list=>{for(const c of list){if(new URL(c.url).origin===self.location.origin){c.navigate?.(target);return c.focus()}}return clients.openWindow(target)}))});
